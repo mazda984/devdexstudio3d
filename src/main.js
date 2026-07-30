@@ -333,7 +333,7 @@ room.initialize().then(() => {
             try {
                 const shared = await fetchSharedMap(bucket, rid);
                 if (shared && shared.data) {
-                    setTimeout(() => startGame(shared.name || playName, shared.data), 300);
+                    setTimeout(() => startGame(shared.name || playName, shared.data, { minimalHud: true }), 300);
                     return;
                 }
             } catch (e) {
@@ -350,7 +350,7 @@ room.initialize().then(() => {
 
         const save = saves.find(s => s.name === playName);
         if (save) {
-            setTimeout(() => startGame(save.name, save.data), 300);
+            setTimeout(() => startGame(save.name, save.data, { minimalHud: true }), 300);
         } else {
             console.warn(`No saved game named "${playName}" found (remote fetch failed and it's not in this browser's local storage).`);
             addChatMessage && addChatMessage('System', `Couldn't load saved game "${playName}". The share link may have expired, or this browser doesn't have it saved locally.`);
@@ -852,6 +852,7 @@ let lastCamYawClick = 0;
 
 // Game State
 let gameState = 'MENU'; // MENU, CUSTOMIZE, PLAYING, SETTINGS, STUDIO, TEST
+let minimalHudActive = false; // true when playing via a shared link with no chat/leave-game UI shown
 
 const menuBGM = new Audio('./Asgore Runs Over Dess With Lyrics - Deltarune.mp3');
 menuBGM.loop = true;
@@ -2713,7 +2714,10 @@ const openGameDetail = (title, mapName, mapData = null, author = "RichyBoi") => 
     updateGameDetailPlayerCount();
 };
 
-function startGame(mapName, mapData = null) {
+function startGame(mapName, mapData = null, opts = {}) {
+    const minimalHud = !!opts.minimalHud;
+    minimalHudActive = minimalHud;
+
     playSwitch();
     menuBGM.pause();
     menuBGM.currentTime = 0;
@@ -2726,7 +2730,7 @@ function startGame(mapName, mapData = null) {
         const playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${runId}`;
         try { localStorage.setItem('nblox_map_url_' + mapName, playUrl); } catch(e){}
         try { history.replaceState({}, `${mapName} - Play`, playUrl); } catch(e){}
-        addChatMessage('System', `Play URL: ${playUrl}`);
+        if (!minimalHud) addChatMessage('System', `Play URL: ${playUrl}`);
     } catch (err) {
         console.warn('Failed to create runtime play URL:', err);
     }
@@ -2735,20 +2739,27 @@ function startGame(mapName, mapData = null) {
     playMenu.style.display = 'none';
     gameDetailMenu.style.display = 'none';
     startMenu.style.display = 'none';
-    
-    chatContainer.style.display = 'flex';
-    btnExit.style.display = 'block';
-    btnReset.style.display = 'block';
+
+    if (minimalHud) {
+        // Clean mode: just the 3D game, no chat / leave-game / player-list chrome.
+        chatContainer.style.display = 'none';
+        btnExit.style.display = 'none';
+        btnReset.style.display = 'none';
+        playerList.style.display = 'none';
+    } else {
+        chatContainer.style.display = 'flex';
+        btnExit.style.display = 'block';
+        btnReset.style.display = 'block';
+        playerList.style.display = 'flex';
+        updatePlayerList();
+    }
+
     gameState = 'PLAYING';
     player.forcedAnim = null; // Reset forced animation from menu
     
     // Add join message
     const username = document.getElementById('input-username').value || "Guest";
-    addChatMessage("System", `${username} has joined the game.`);
-
-    // Show Player List
-    playerList.style.display = 'flex';
-    updatePlayerList();
+    if (!minimalHud) addChatMessage("System", `${username} has joined the game.`);
 
     if (mapData) {
         world.loadFromData(mapData);
@@ -3271,6 +3282,7 @@ btnExit.onclick = () => {
 
     startMenu.style.display = 'block';
     gameState = 'MENU';
+    minimalHudActive = false;
     if (world.mapGroup) world.mapGroup.visible = false;
 
     // Clean the address bar back to the base URL, so leaving actually leaves:
@@ -4546,6 +4558,11 @@ chatInput.addEventListener('keydown', (e) => {
     }
     if (e.key === 'Escape') {
         chatInput.blur();
+        // In clean/minimal-HUD play mode there's no visible Leave Game button,
+        // so give people a way out via Escape instead.
+        if (minimalHudActive && gameState === 'PLAYING') {
+            btnExit.click();
+        }
     }
 });
 
