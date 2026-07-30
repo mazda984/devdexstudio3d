@@ -851,7 +851,7 @@ let cameraInvertY = false;
 let lastCamYawClick = 0;
 
 // Game State
-let gameState = 'STUDIO'; // MENU, CUSTOMIZE, PLAYING, SETTINGS, STUDIO, TEST
+let gameState = 'MENU'; // MENU, CUSTOMIZE, PLAYING, SETTINGS, STUDIO, TEST
 
 const menuBGM = new Audio('./Asgore Runs Over Dess With Lyrics - Deltarune.mp3');
 menuBGM.loop = true;
@@ -3272,7 +3272,12 @@ btnExit.onclick = () => {
     startMenu.style.display = 'block';
     gameState = 'MENU';
     if (world.mapGroup) world.mapGroup.visible = false;
-    
+
+    // Clean the address bar back to the base URL, so leaving actually leaves:
+    // reloading the page (or copying the URL) won't jump straight back into
+    // the game you just left via a stale "?play=..." link.
+    try { history.replaceState({}, document.title, window.location.pathname); } catch (e) {}
+
     // Clear presence map so we aren't counted as online
     room.updatePresence({ map: 'MENU' });
 
