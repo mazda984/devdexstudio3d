@@ -2715,8 +2715,11 @@ const openGameDetail = (title, mapName, mapData = null, author = "RichyBoi") => 
 };
 
 function startGame(mapName, mapData = null, opts = {}) {
-    const minimalHud = !!opts.minimalHud;
-    minimalHudActive = minimalHud;
+    // Gameplay is always the clean view now: no chat box, no big Leave Game /
+    // Reset Character buttons, no player list, and the Studio editor panel is
+    // force-hidden so it can never end up stacked on top of the game (which is
+    // what was happening before). Escape exits back to the menu.
+    minimalHudActive = true;
 
     playSwitch();
     menuBGM.pause();
@@ -2730,29 +2733,20 @@ function startGame(mapName, mapData = null, opts = {}) {
         const playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${runId}`;
         try { localStorage.setItem('nblox_map_url_' + mapName, playUrl); } catch(e){}
         try { history.replaceState({}, `${mapName} - Play`, playUrl); } catch(e){}
-        if (!minimalHud) addChatMessage('System', `Play URL: ${playUrl}`);
     } catch (err) {
         console.warn('Failed to create runtime play URL:', err);
     }
     
-    // Hide all menus
+    // Hide all menus and the Studio editor panel - only the 3D game should be visible.
     playMenu.style.display = 'none';
     gameDetailMenu.style.display = 'none';
     startMenu.style.display = 'none';
+    studioGui.style.display = 'none';
 
-    if (minimalHud) {
-        // Clean mode: just the 3D game, no chat / leave-game / player-list chrome.
-        chatContainer.style.display = 'none';
-        btnExit.style.display = 'none';
-        btnReset.style.display = 'none';
-        playerList.style.display = 'none';
-    } else {
-        chatContainer.style.display = 'flex';
-        btnExit.style.display = 'block';
-        btnReset.style.display = 'block';
-        playerList.style.display = 'flex';
-        updatePlayerList();
-    }
+    chatContainer.style.display = 'none';
+    btnExit.style.display = 'none';
+    btnReset.style.display = 'none';
+    playerList.style.display = 'none';
 
     gameState = 'PLAYING';
     player.forcedAnim = null; // Reset forced animation from menu
