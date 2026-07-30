@@ -152,21 +152,40 @@ export class World {
 
     loadFromData(data) {
         this.clear();
-        if (!Array.isArray(data)) return;
-        
+        if (!Array.isArray(data) || data.length === 0) {
+            console.warn('World data was missing/invalid/empty - loading a default platform instead so the player has a floor to spawn on.');
+            this.setupPlatform();
+            return;
+        }
+
+        let placedCount = 0;
         data.forEach(d => {
-            if (d.type === 'meta_bgm') {
-                this.bgm = d.url;
-            } else if (d.type === 'block' || d.type === 'box') {
-                const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags);
-                mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
-                mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
-            } else if (d.type === 'sphere' || d.type === 'cylinder' || d.type === 'wedge') {
-                const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags);
-                mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
-                mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+            try {
+                if (d.type === 'meta_bgm') {
+                    this.bgm = d.url;
+                } else if (d.type === 'block' || d.type === 'box') {
+                    const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags);
+                    mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
+                    mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    placedCount++;
+                } else if (d.type === 'sphere' || d.type === 'cylinder' || d.type === 'wedge') {
+                    const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags);
+                    mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
+                    mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    placedCount++;
+                }
+            } catch (e) {
+                console.warn('Skipped a corrupted world object during load:', e, d);
             }
         });
+
+        // If everything in the data was just metadata (e.g. only a music entry) and no
+        // actual parts got placed, fall back to a default floor so there's still something
+        // to stand on instead of an empty void.
+        if (placedCount === 0) {
+            console.warn('World data contained no placeable objects - loading a default platform instead.');
+            this.setupPlatform();
+        }
     }
 
     addToWorld(mesh, types = ['static']) {
@@ -355,7 +374,18 @@ export class World {
         boxUnwrapUVs(centerGeo);
         const centerMesh = new THREE.Mesh(centerGeo, centerMats);
         centerMesh.position.set(0, height/2, 0);
-        this.addToWorld(centerMesh);
+        // IMPORTANT: give this floor proper serialization data (previously missing),
+        // and mark it as the spawn point. Without this, saving/publishing a map built
+        // on top of this default floor would silently drop the floor itself and leave
+        // no spawn point, causing the player to fall forever through an empty void
+        // when the saved map was reloaded.
+        centerMesh.userData.serial = {
+            type: 'block',
+            w: centerSize, h: height, d: centerSize,
+            color: 0xffffff,
+            flags: ['static', 'spawn']
+        };
+        this.addToWorld(centerMesh, ['static', 'spawn']);
 
         // 2. Rim Meshes Helper
         const addRim = (w, h, d, x, y, z) => {
@@ -363,6 +393,14 @@ export class World {
             boxUnwrapUVs(geo);
             const mesh = new THREE.Mesh(geo, rimMats);
             mesh.position.set(x, y, z);
+            // Also give rims proper serialization data so the full default platform
+            // (not just user-added blocks) survives a save/publish/load round trip.
+            mesh.userData.serial = {
+                type: 'block',
+                w: w, h: h, d: d,
+                color: 0x888888,
+                flags: ['static']
+            };
             this.addToWorld(mesh);
         };
 

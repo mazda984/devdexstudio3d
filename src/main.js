@@ -61,7 +61,10 @@ async function shareMapRemotely(mapName, saveObj) {
     const bucket = await getOrCreateShareBucket();
     const key = 'map_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
     const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: saveObj.data });
-    const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: payload });
+    // Base64-encode before upload so nothing in the JSON (quotes, unicode, newlines)
+    // can get mangled/escaped/truncated by the third-party storage layer in transit.
+    const encoded = btoa(unescape(encodeURIComponent(payload)));
+    const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: encoded });
     if (!res.ok) throw new Error('Could not upload map for sharing (status ' + res.status + ')');
     return { bucket, key };
 }
@@ -69,7 +72,16 @@ async function shareMapRemotely(mapName, saveObj) {
 async function fetchSharedMap(bucket, key) {
     const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`);
     if (!res.ok) throw new Error('Shared map not found (status ' + res.status + ')');
-    return JSON.parse(await res.text());
+    const raw = (await res.text()).trim();
+    let jsonText;
+    try {
+        // Expected path: value is our base64-encoded payload.
+        jsonText = decodeURIComponent(escape(atob(raw)));
+    } catch (e) {
+        // Fallback for any older/non-base64 entries: treat as plain JSON text.
+        jsonText = raw;
+    }
+    return JSON.parse(jsonText);
 }
 // -----------------------------------------------------------------------------
 
