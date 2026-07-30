@@ -1,0 +1,1173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ROBLOX</title>
+    <base target="_blank">
+    <style>
+        @font-face {
+            font-family: 'Comic Sans Custom';
+            src: url('./Comic Sans MS.ttf') format('truetype');
+        }
+
+        /* Force Comic Sans EVERYWHERE with extreme prejudice */
+        * {
+            font-family: "Comic Sans Custom", "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Comic Neue", cursive, sans-serif !important;
+        }
+
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background: #000; 
+            cursor: url('./nothing.png'), auto; 
+            zoom: 0.75;
+        }
+        /* Ensure Comic Sans everywhere */
+        button, input, select, textarea, div, span, label, h1, h2, h3, h4, h5, h6, p, a {
+            font-family: "Comic Sans Custom", "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Comic Neue", cursive, sans-serif !important;
+        }
+
+        #custom-cursor {
+            position: fixed;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 10000;
+        }
+        /* 90s UI Styles */
+        .xp-window, .menu-popup, .sidebar {
+            /* Windows XP-esque shell: light beige panel with subtle drop shadow and rounded corners */
+            background: #ece9d8 !important;
+            border: 1px solid #8c8c8c !important;
+            box-shadow:
+                0 2px 4px rgba(0, 0, 0, 0.35),
+                0 0 0 1px rgba(255, 255, 255, 0.4) inset !important;
+            border-radius: 6px !important;
+            color: black !important;
+            padding: 3px !important;
+            display: flex;
+            flex-direction: column;
+            gap: 0 !important;
+        }
+
+        .xp-window {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 300px;
+            z-index: 99999;
+            display: none;
+            pointer-events: auto;
+            font-family: "Comic Sans Custom", "Comic Sans MS", "Comic Sans", cursive, sans-serif !important;
+            min-width: 150px;
+            min-height: 100px;
+        }
+        /* Allow overriding transform for dragging */
+        .xp-window[style*="top"] {
+            transform: none !important;
+        }
+
+        .xp-title-bar {
+            /* Windows XP blue gradient title bar */
+            background: linear-gradient(to right, #3a6ea5, #2b5797);
+            padding: 3px 6px;
+            color: #ffffff;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-radius: 6px 6px 0 0;
+            font-size: 14px;
+            min-height: 22px;
+            margin: -3px -3px 2px -3px; /* bleed to window edge */
+            font-family: "Comic Sans Custom", "Comic Sans MS", cursive, sans-serif !important;
+            user-select: none;
+            cursor: default;
+            text-shadow: 0 1px 1px rgba(0, 0, 0, 0.7);
+        }
+        .xp-btn-close {
+            width: 16px; height: 16px;
+            background: linear-gradient(to bottom, #fffbff, #e48f8f);
+            border: 1px solid #3f3f3f;
+            border-radius: 2px;
+            color: #000;
+            font-size: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            margin-left: 5px;
+            padding: 0;
+            min-width: 0 !important;
+            box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+        }
+        .xp-btn-close:active {
+            background: linear-gradient(to bottom, #e48f8f, #fffbff);
+            box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.8) inset;
+            padding-top: 1px;
+        }
+
+        .xp-body {
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            color: black;
+            font-size: 14px;
+            flex: 1;
+            width: 100%;
+            box-sizing: border-box;
+            overflow-y: auto;
+        }
+        /* Windows XP-style buttons */
+        .xp-button, .menu-btn, .hud-btn, #dev-menu button, #btn-cust-done {
+            background: linear-gradient(to bottom, #ffffff, #dbe7f5) !important;
+            border: 1px solid #3f5b94 !important;
+            color: #000 !important;
+            border-radius: 4px !important;
+            cursor: pointer;
+            box-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.9) inset,
+                0 1px 2px rgba(0, 0, 0, 0.25) !important;
+            font-weight: bold;
+            text-align: center;
+            transition: background 0.1s ease-out, box-shadow 0.1s ease-out !important;
+        }
+        .xp-button:hover, .menu-btn:hover, .hud-btn:hover, #dev-menu button:hover, #btn-cust-done:hover {
+            background: linear-gradient(to bottom, #fff8d8, #ffd38a) !important;
+        }
+        .xp-button:active, .menu-btn:active, .hud-btn:active, #dev-menu button:active, #btn-cust-done:active {
+            background: linear-gradient(to bottom, #c1d2ee, #eff3fb) !important;
+            box-shadow:
+                0 -1px 0 rgba(255, 255, 255, 0.9) inset,
+                0 0 0 rgba(0, 0, 0, 0.0) !important;
+            padding-top: 2px; /* Visual press */
+            transform: translate(1px, 1px);
+        }
+        
+        #dev-menu {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: #c0c0c0;
+            border: 2px solid white;
+            border-right-color: #404040;
+            border-bottom-color: #404040;
+            color: black;
+            padding: 10px;
+            border-radius: 0;
+            z-index: 100;
+            display: none;
+            flex-direction: column;
+            gap: 5px;
+            pointer-events: auto;
+        }
+        #dev-menu button {
+            background: #c0c0c0;
+            color: black;
+            padding: 4px;
+            font-size: 12px;
+            width: 100%;
+        }
+        .dev-info { font-size: 11px; margin-bottom: 5px; color: #000; }
+        
+        #chat-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 300px;
+            height: 200px;
+            display: none;
+            flex-direction: column;
+            z-index: 50;
+            pointer-events: none;
+        }
+        #chat-history {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            background: rgba(30, 30, 30, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-bottom: none;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+        }
+        #chat-history::-webkit-scrollbar { width: 6px; }
+        #chat-history::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 3px; }
+
+        #chat-input-row {
+            background: rgba(30, 30, 30, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-bottom-left-radius: 6px;
+            border-bottom-right-radius: 6px;
+            padding: 5px;
+            pointer-events: auto;
+        }
+        #chat-input {
+            width: 100%;
+            box-sizing: border-box;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid #333;
+            border-radius: 3px;
+            padding: 4px 6px;
+            font-size: 13px;
+            color: black;
+            outline: none;
+        }
+        #chat-input:focus { background: white; }
+        
+        .chat-msg {
+            font-size: 14px;
+            margin-bottom: 2px;
+            text-shadow: 1px 1px 0 #000;
+        }
+        .chat-name {
+            font-weight: bold;
+            color: #6eb5ff;
+            margin-right: 4px;
+        }
+        .chat-text {
+            color: white;
+            word-wrap: break-word;
+        }
+
+        @media (max-width: 768px) {
+            #chat-container {
+                width: 250px;
+                height: 150px;
+                top: 10px;
+                left: 10px;
+            }
+            .chat-msg { font-size: 12px; }
+        }
+
+        /* Menus */
+        .menu-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: transparent;
+            z-index: 2000;
+            /* Changed from flex to block to allow absolute positioning of windows */
+            display: block; 
+            pointer-events: none;
+        }
+
+        /* Start Menu specific */
+        #start-menu {
+            /* Reset padding/alignment as we position the window directly */
+            padding: 0; 
+        }
+        #start-menu .menu-popup {
+            position: absolute;
+            top: 100px;
+            left: 50px;
+        }
+
+        /* Customize Menu specific */
+        #customize-menu {
+            padding: 0;
+        }
+        
+        /* The container for the customize sidebar */
+        .sidebar {
+            padding: 20px;
+            width: 320px;
+            height: 70vh;
+            overflow-y: auto;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            color: black;
+            /* Make it a floating XP-style tool window */
+            position: absolute;
+            top: 40px;
+            right: 40px;
+            background: #ece9d8 !important;
+            border: 1px solid #8c8c8c !important;
+            box-shadow:
+                0 2px 4px rgba(0, 0, 0, 0.35),
+                0 0 0 1px rgba(255, 255, 255, 0.4) inset !important;
+            border-radius: 6px !important;
+        }
+
+        .menu-title {
+            font-size: 72px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            color: #000080;
+            text-shadow: 2px 2px 0px #ffffff;
+            pointer-events: auto;
+            -webkit-text-stroke: 0;
+        }
+
+        .menu-btn {
+            display: block;
+            width: 280px;
+            padding: 8px;
+            margin: 10px 0;
+            font-size: 24px;
+            text-align: center;
+        }
+
+        /* HUD Buttons */
+        .hud-btn {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 2000;
+            display: none;
+            padding: 6px 12px;
+            font-size: 16px;
+            pointer-events: auto;
+        }
+
+        /* Graphical Editor Styling */
+        .avatar-vis {
+            display: grid;
+            grid-template-areas:
+                ". head ."
+                "larm torso rarm"
+                "lleg . rleg";
+            gap: 5px;
+            width: 200px;
+            margin: 0 auto 20px auto;
+        }
+        
+        .av-part {
+            width: 60px;
+            height: 60px;
+            border: 2px solid;
+            border-color: #404040 #ffffff #ffffff #404040; /* Inset */
+            border-radius: 0;
+            cursor: pointer;
+            position: relative;
+            background: #ccc;
+        }
+        .av-part input[type=color] {
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+            position: absolute;
+            top: 0; left: 0;
+        }
+        
+        .av-head { grid-area: head; border-radius: 0; }
+        .av-torso { grid-area: torso; height: 80px; }
+        .av-larm { grid-area: larm; height: 80px; }
+        .av-rarm { grid-area: rarm; height: 80px; }
+        .av-lleg { grid-area: lleg; height: 80px; }
+        .av-rleg { grid-area: rleg; height: 80px; }
+
+        .file-upload-btn {
+            position: relative;
+            overflow: hidden;
+            background: #c0c0c0;
+            border-top: 2px solid #ffffff;
+            border-left: 2px solid #ffffff;
+            border-right: 2px solid #404040;
+            border-bottom: 2px solid #404040;
+            border-radius: 0;
+            color: black;
+            padding: 6px;
+            text-align: center;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+        .file-upload-btn:active {
+            border-top: 2px solid #404040;
+            border-left: 2px solid #404040;
+            border-right: 2px solid #ffffff;
+            border-bottom: 2px solid #ffffff;
+        }
+        .file-upload-btn input[type=file] {
+            position: absolute;
+            top: 0; right: 0; min-width: 100%; min-height: 100%;
+            font-size: 100px; text-align: right; filter: alpha(opacity=0); opacity: 0; outline: none; background: white; cursor: inherit; display: block;
+        }
+        
+        /* Scrollbar */
+        .sidebar::-webkit-scrollbar { width: 16px; }
+        .sidebar::-webkit-scrollbar-thumb { 
+            /* XP-style rounded teal-ish scrollbar thumb */
+            background: linear-gradient(to bottom, #e0efff, #a6c2e8);
+            border-radius: 8px;
+            border: 1px solid #6f8dbb;
+        }
+        .sidebar::-webkit-scrollbar-track { 
+            background: #f4f2e9;
+        }
+
+        /* Generic Menu Popup */
+        .menu-popup {
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            pointer-events: auto;
+            min-width: 320px;
+            /* Make windows float */
+            position: absolute;
+            box-shadow: 4px 4px 0 #000 !important;
+            min-height: 200px; /* Ensure space for resize */
+        }
+        
+        /* Resizer handle */
+        .xp-resizer {
+            width: 16px;
+            height: 16px;
+            background: linear-gradient(135deg, transparent 50%, #888 50%);
+            position: absolute;
+            right: 2px;
+            bottom: 2px;
+            cursor: se-resize;
+            z-index: 100;
+        }
+        
+        #player-list {
+            position: fixed;
+            top: 10px;   /* moved to top-right corner */
+            right: 10px; /* snug to the right edge */
+            width: 220px; /* a bit wider to accommodate names */
+            display: none;
+            z-index: 9000;
+            transform: none !important; /* ensure it's not centered by .xp-window transform */
+            left: auto !important; /* prevent left from being used when centered */
+        }
+
+        #play-menu .menu-popup {
+            top: 150px;
+            left: 200px;
+        }
+
+        #settings-menu .menu-popup {
+            bottom: 100px;
+            left: 100px;
+            top: auto;
+        }
+        
+        .settings-row {
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+            align-items: center;
+            margin-bottom: 15px;
+            font-weight: bold;
+            color: black;
+            font-size: 18px;
+        }
+        input[type=range] {
+            accent-color: #000080;
+        }
+
+        /* Studio UI Styles */
+        #studio-gui {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: none;
+            flex-direction: column;
+            font-family: "Comic Sans Custom", "Comic Sans MS", cursive, sans-serif !important;
+        }
+        
+        #studio-ribbon {
+            height: 100px;
+            background: #dfe8f5;
+            border-bottom: 1px solid #999;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .ribbon-tabs {
+            display: flex;
+            background: #dfe8f5;
+            padding-top: 4px;
+        }
+        .ribbon-tab {
+            padding: 4px 12px;
+            background: white;
+            border: 1px solid #999;
+            border-bottom: none;
+            margin-left: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        .ribbon-toolbar {
+            flex: 1;
+            background: white;
+            padding: 5px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            border-bottom: 1px solid #ccc;
+        }
+
+        .tool-group {
+            display: flex;
+            gap: 2px;
+            padding: 0 5px;
+            border-right: 1px solid #eee;
+        }
+
+        .tool-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            width: 50px;
+            height: 60px;
+            border: 1px solid transparent;
+            cursor: pointer;
+            font-size: 11px;
+            color: #333;
+        }
+        .tool-btn:hover {
+            background: #eef;
+            border: 1px solid #aaf;
+        }
+        .tool-btn.active {
+            background: #dde;
+            border: 1px solid #99d;
+        }
+        .tool-icon {
+            width: 32px;
+            height: 32px;
+            margin-bottom: 2px;
+            object-fit: contain;
+        }
+
+        #studio-explorer {
+            position: absolute;
+            right: 0;
+            top: 100px;
+            height: 40%;
+            width: 200px;
+            background: white;
+            border-left: 1px solid #999;
+            border-bottom: 1px solid #999;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+
+        #studio-properties {
+            position: absolute;
+            right: 0;
+            top: auto;
+            bottom: 0;
+            height: calc(60% - 100px);
+            width: 200px;
+            background: white;
+            border-left: 1px solid #999;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+        
+        .explorer-item {
+            padding: 2px 4px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            user-select: none;
+            border: 1px solid transparent;
+        }
+        .explorer-item:hover {
+            background: #eef;
+            border-color: #ccf;
+        }
+        .explorer-item.selected {
+            background: #cceeff;
+            border-color: #99ccff;
+        }
+        .icon-part {
+            width: 10px; height: 10px; 
+            background: #ccc; 
+            border: 1px solid #888;
+            box-shadow: 1px 1px 0 #000;
+        }
+        
+        .prop-header {
+            background: #dfe8f5;
+            padding: 4px;
+            font-weight: bold;
+            font-size: 12px;
+            border-bottom: 1px solid #ccc;
+        }
+        
+        .prop-row {
+            display: flex;
+            padding: 4px;
+            border-bottom: 1px solid #eee;
+            font-size: 12px;
+        }
+        .prop-label { flex: 1; color: #555; }
+        .prop-val { width: 80px; }
+        
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://esm.sh/three@0.160.0",
+                "three/addons/": "https://esm.sh/three@0.160.0/examples/jsm/",
+                "nipplejs": "https://esm.sh/nipplejs@0.10.1",
+                "jszip": "https://esm.sh/jszip@3.10.1"
+            }
+        }
+    </script>
+    <script>
+        // Bu proje aslinda Websim ortaminda calisacak sekilde yazilmis ve
+        // "WebsimSocket" adinda gercek zamanli (multiplayer) bir sunucu
+        // baglantisi bekliyor. Proje disari (Websim disina) "publish"
+        // edildiginde bu sinif tanimli olmadigi icin oyun scripti daha
+        // en basta hata veriyor ve sahne hic olusturulmadan ekran siyah
+        // kaliyor. Asagidaki, gercek Websim sunucusu yoksa devreye giren
+        // basit bir yerel (tek oyunculu) yedek/polyfill'dir; boylece oyun
+        // cokmeden calisir, sadece coklu oyuncu/chat ozellikleri pasif olur.
+        if (typeof window.WebsimSocket === 'undefined') {
+            window.WebsimSocket = class WebsimSocket {
+                constructor() {
+                    this.clientId = 'local-' + Math.random().toString(36).slice(2, 10);
+                    this.presence = {};
+                    this.peers = {};
+                    this.roomState = {};
+                    this.onmessage = null;
+                    this._presenceHandlers = [];
+                }
+                async initialize() {
+                    this.presence[this.clientId] = { username: 'Guest' };
+                    return Promise.resolve();
+                }
+                subscribePresence(handler) {
+                    this._presenceHandlers.push(handler);
+                    try { handler(this.presence); } catch (e) {}
+                    return () => {
+                        this._presenceHandlers = this._presenceHandlers.filter(h => h !== handler);
+                    };
+                }
+                updatePresence(data) {
+                    this.presence[this.clientId] = { ...(this.presence[this.clientId] || {}), ...data };
+                    this._presenceHandlers.forEach(h => {
+                        try { h(this.presence); } catch (e) {}
+                    });
+                }
+                send(data) {
+                    if (typeof this.onmessage === 'function') {
+                        try {
+                            this.onmessage({ data: { ...data, clientId: this.clientId } });
+                        } catch (e) {}
+                    }
+                }
+                subscribeRoomState(handler) {
+                    try { handler(this.roomState); } catch (e) {}
+                    return () => {};
+                }
+                updateRoomState(data) {
+                    this.roomState = { ...this.roomState, ...data };
+                }
+            };
+            console.warn('[uyari] Gercek Websim sunucusuna baglanilamadi; yerel (tek oyunculu) WebsimSocket yedegi devrede. Coklu oyuncu ve gercek zamanli sohbet ozellikleri bu ortamda calismayacaktir.');
+        }
+    </script>
+</head>
+<body>
+    <!-- Mobile specific UI -->
+    <div id="mobile-ui" style="display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5000;">
+        <div id="zone_joystick" style="position: absolute; bottom: 20px; left: 20px; width: 150px; height: 150px; pointer-events: auto;"></div>
+        <button id="btn-mobile-jump" style="position: absolute; bottom: 40px; right: 40px; width: 80px; height: 80px; border-radius: 50%; background: rgba(255,255,255,0.3); border: 2px solid white; color: white; font-weight: bold; pointer-events: auto; font-size: 16px;">JUMP</button>
+    </div>
+
+    <div id="start-menu" class="menu-overlay" style="display:none;">
+        <div class="menu-popup" style="width: 380px;">
+            <div class="xp-title-bar">
+                <span>ROBLOX Launcher</span>
+                <button id="btn-close-start" class="xp-btn-close">X</button>
+            </div>
+            <div class="xp-body">
+                <div class="menu-title" style="font-size: 64px;">
+                    <img src="./Roblox-logo.png" alt="ROBLOX" style="max-width: 100%; height: 64px; object-fit: contain; display:block; margin: 0 auto;">
+                </div>
+                <div style="width: 100%; margin-bottom: 5px; text-align: left;">
+                    <label id="lbl-username" style="font-weight: bold;">Username:</label>
+                    <div style="display: flex; gap: 5px;">
+                        <input type="text" id="input-username" value="Guest" style="flex: 1; padding: 4px; box-sizing: border-box; border: 2px solid #888; border-right-color: #fff; border-bottom-color: #fff; background: #fff;">
+                        <button id="btn-save-name" class="menu-btn" style="width: auto; padding: 2px 8px; margin: 0; font-size: 12px;">Save</button>
+                    </div>
+                    <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                        <label style="font-size:12px; font-weight:bold;">Age:</label>
+                        <input id="input-age" type="number" min="5" max="120" value="18" style="width:70px; padding:4px; box-sizing:border-box; border:2px solid #888; background:#fff;">
+                        <div id="age-hint" style="font-size:11px; color:#666;">(used for moderation)</div>
+                    </div>
+                    <div id="name-limit-msg" style="font-size: 10px; color: red; margin-top: 2px;"></div>
+                </div>
+                <button id="btn-play" class="menu-btn" style="display:none;">PLAY</button>
+                <button id="btn-create" class="menu-btn" style="display:none; background:#ffaa00; color:#000; font-weight:bold;">CREATE</button>
+                <button id="btn-studio" class="menu-btn">ROBLOX Studio</button>
+                <button id="btn-forum" class="menu-btn">FORUM</button>
+                <button id="btn-customize" class="menu-btn">CUSTOMIZE CHARACTER</button>
+                <button id="btn-settings" class="menu-btn">SETTINGS</button>
+                <div style="display:flex; gap:8px; align-items:center; margin-top:6px; width:100%; justify-content:center;">
+                    <div style="font-weight:bold; color:#000080;">Points: <span id="points-display">0</span></div>
+                    <button id="btn-donate-points" class="menu-btn" style="width:auto; padding:4px 8px; background:#ffd38a;" title="Spend 10 points to gain one name change">Get Name Change (10 pts)</button>
+                    <button id="btn-donate-robux" class="menu-btn" style="width:auto; padding:4px 8px; background:#ffd3d3; color:#000; margin-left:6px;" title="Give Robux to another online player">DONATE ROBUX</button>
+                </div>
+
+                <!-- Download Client (real) -->
+                <button id="btn-download-client" class="menu-btn" style="background: #4b8cff; color: white; width:100%;">DOWNLOAD CLIENT</button>
+
+                <button id="btn-toggle-mobile" class="menu-btn" style="background: #00aaff; color: white;">TOGGLE MOBILE MODE</button>
+            </div>
+            <div class="xp-resizer"></div>
+        </div>
+    </div>
+
+    <div id="play-menu" class="menu-overlay" style="display: none;">
+        <div class="menu-popup" style="width: 90%; height: 90%; max-width: 800px; top: 50%; left: 50%; transform: translate(-50%, -50%) !important;">
+            <div class="xp-title-bar">
+                <span>Select World</span>
+                <button id="btn-close-play" class="xp-btn-close">X</button>
+            </div>
+            <div class="xp-body" style="height: 100%; overflow: hidden;">
+                <div class="menu-title" style="font-size: 48px;">Games</div>
+                <div id="world-list" style="width:100%; height: 100%; overflow-y: auto; display:flex; flex-direction:column; gap:10px; padding: 10px;">
+                    <button id="btn-world-default" class="menu-btn" style="width:100%;">Hub</button>
+                </div>
+                <button id="btn-play-back" class="menu-btn" style="margin-top: 20px;">&lt; Back</button>
+            </div>
+            <div class="xp-resizer"></div>
+        </div>
+    </div>
+
+    <div id="game-detail-menu" class="menu-overlay" style="display: none;">
+        <div class="menu-popup" style="width: 420px;">
+            <div class="xp-title-bar">
+                <span id="gd-window-title">Place1</span>
+                <button id="btn-close-gd" class="xp-btn-close">X</button>
+            </div>
+            <div class="xp-body">
+                <h2 id="gd-title" style="margin: 0; font-size: 32px; color: #000080; text-align: center; width: 100%;">Game Title</h2>
+                <div id="gd-author" style="font-size: 14px; margin-bottom: 10px;">By Nblox User</div>
+                
+                <div style="width: 360px; height: 240px; background: #000; border: 2px solid #888; border-right-color: #fff; border-bottom-color: #fff; position: relative; overflow: hidden;">
+                    <img id="gd-thumb" src="./Screenshot 2026-05-12 121527.png" style="width: 100%; height: 100%; object-fit: cover;">
+                    <div id="gd-player-count" style="position: absolute; bottom: 0; left: 0; width: 100%; background: rgba(0,0,0,0.5); color: white; padding: 5px; font-size: 12px;">
+                        0 Players Online
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 10px; width: 100%; justify-content: center; margin-top: 15px;">
+                    <button id="btn-gd-play" class="menu-btn" style="width: 150px; background: #00cc00 !important; color: white !important; font-weight: bold; border-color: #00ff00 !important; border-right-color: #006600 !important; border-bottom-color: #006600 !important; text-shadow: 1px 1px 0 #000;">PLAY</button>
+                    <button id="btn-gd-back" class="menu-btn" style="width: 100px;">Cancel</button>
+                </div>
+
+                <div id="gd-reviews-section" style="width: 100%; margin-top: 15px; border-top: 2px solid #888; padding-top: 10px; display: flex; flex-direction: column; gap: 5px;">
+                    <div style="font-weight: bold; color: #000080;">User Reviews</div>
+                    <div id="gd-reviews-list" style="width: 100%; height: 120px; overflow-y: scroll; background: white; border: 2px solid #888; border-right-color: #fff; border-bottom-color: #fff; padding: 5px; font-size: 12px; box-sizing: border-box;">
+                        <!-- Reviews populated via JS -->
+                        <div style="color: #666; font-style: italic;">No reviews yet.</div>
+                    </div>
+                    <div style="display: flex; gap: 5px; width: 100%;">
+                        <input type="text" id="gd-review-input" placeholder="Write a comment..." style="flex: 1; padding: 2px;">
+                        <button id="btn-post-review" class="menu-btn" style="width: auto; padding: 2px 8px; font-size: 12px; margin: 0;">Post</button>
+                    </div>
+                </div>
+            </div>
+            <div class="xp-resizer"></div>
+        </div>
+    </div>
+
+    <div id="forum-menu" class="menu-overlay" style="display: none;">
+        <div class="menu-popup" style="width: 640px; height: 500px; top: 60px; left: 60px;">
+            <div class="xp-title-bar">
+                <span>Nblox Forums</span>
+                <button id="btn-close-forum" class="xp-btn-close">X</button>
+            </div>
+            <div class="xp-body" style="padding: 0; display: flex; flex-direction: column; overflow: hidden;">
+                <div style="width: 100%; background: #c0c0c0; border-bottom: 2px solid #888; border-bottom-color: #404040; padding: 4px; display: flex; gap: 5px; flex-shrink: 0;">
+                    <button id="btn-forum-home" class="menu-btn" style="width: auto; padding: 2px 8px; font-size: 12px; margin: 0;">Home</button>
+                    <button id="btn-new-thread" class="menu-btn" style="width: auto; padding: 2px 8px; font-size: 12px; margin: 0;">New Thread</button>
+                </div>
+                
+                <div id="forum-content" style="flex: 1; width: 100%; overflow-y: auto; background: white; padding: 5px; box-sizing: border-box; font-family: 'Comic Sans MS', sans-serif;">
+                    <!-- Content -->
+                </div>
+            </div>
+            <div class="xp-resizer"></div>
+        </div>
+    </div>
+
+    <div id="player-list" class="xp-window">
+        <div class="xp-title-bar">
+            <span>Players</span>
+            <button style="visibility: hidden;" class="xp-btn-close">X</button>
+        </div>
+        <div class="xp-body" style="padding: 0;">
+            <div id="plist-content" style="width: 100%; height: 100%; background: white; border: 2px solid #888; border-right-color: #fff; border-bottom-color: #fff; padding: 5px; box-sizing: border-box;">
+                Guest
+            </div>
+        </div>
+        <div class="xp-resizer"></div>
+    </div>
+
+    <button id="btn-exit-game" class="hud-btn">LEAVE GAME</button>
+    <button id="btn-reset-char" class="hud-btn" style="top: 45px;">RESET CHARACTER</button>
+    <button id="btn-stop-test" class="hud-btn" style="background: #ffcccc !important; border-color: #ff0000 !important; top: 10px; left: 130px; display: none;">STOP</button>
+
+    <div id="studio-gui" style="display:flex;">
+        <div id="studio-ribbon">
+            <div class="ribbon-tabs">
+                <div class="ribbon-tab" id="btn-studio-exit" style="display: none !important; background: #cc0000; color: white; border-color: #990000; font-weight: bold;">&lt; Back</div>
+                <div class="ribbon-tab">Home</div>
+                <div class="ribbon-tab" style="background: #eee; color: #666;">Model</div>
+                <div class="ribbon-tab" style="background: #eee; color: #666;">View</div>
+            </div>
+            <div class="ribbon-toolbar">
+                <div class="tool-group">
+                    <div class="tool-btn" id="tool-select">
+                        <img src="./ArrowCursor.png" class="tool-icon" style="filter: invert(1);">
+                        <span>Select</span>
+                    </div>
+                    <div class="tool-btn" id="tool-move">
+                        <img src="./MoveTool_ovr.png" class="tool-icon">
+                        <span>Move</span>
+                    </div>
+                    <div class="tool-btn" id="tool-scale">
+                        <img src="./CameraZoomIn_ovr.png" class="tool-icon">
+                        <span>Scale</span>
+                    </div>
+                    <div class="tool-btn" id="tool-rotate">
+                        <img src="./SelectionRotate_ovr.png" class="tool-icon">
+                        <span>Rotate</span>
+                    </div>
+                </div>
+                <div class="tool-group">
+                    <div class="tool-btn" id="tool-part">
+                        <div style="width:24px; height:24px; background:#999; border:1px solid #666; box-shadow: 2px 2px 0 #000;"></div>
+                        <span>Block</span>
+                    </div>
+                    <div class="tool-btn" id="tool-sphere">
+                        <div style="width:24px; height:24px; background:#999; border:1px solid #666; border-radius: 50%; box-shadow: 2px 2px 0 #000;"></div>
+                        <span>Sphere</span>
+                    </div>
+                    <div class="tool-btn" id="tool-cylinder">
+                        <div style="width:16px; height:24px; background:#999; border:1px solid #666; box-shadow: 2px 2px 0 #000;"></div>
+                        <span>Cyl</span>
+                    </div>
+                    <div class="tool-btn" id="tool-wedge">
+                         <div style="width:0; height:0; border-left: 20px solid transparent; border-right: 0px solid transparent; border-bottom: 20px solid #999; filter: drop-shadow(2px 2px 0 #000);"></div>
+                        <span>Wedge</span>
+                    </div>
+                    <div class="tool-btn" id="tool-duplicate">
+                        <div style="font-size: 20px; font-weight: bold;">D</div>
+                        <span>Clone</span>
+                    </div>
+                    <div class="tool-btn" id="tool-delete">
+                        <div style="font-size: 24px; font-weight: bold; color: red;">X</div>
+                        <span>Delete</span>
+                    </div>
+                </div>
+                <div class="tool-group">
+                    <div class="tool-btn" id="tool-music">
+                        <div style="font-size: 24px;">🎵</div>
+                        <span>Music</span>
+                    </div>
+                     <div class="tool-btn" id="tool-publish">
+                        <div style="font-size: 24px;">💾</div>
+                        <span>Publish</span>
+                    </div>
+
+                    <!-- Rig Bot: spawn an interactive rig that can speak -->
+                    <div class="tool-btn" id="tool-rig" title="Spawn Rig Bot">
+                        <div style="font-size: 20px;">🤖</div>
+                        <span>Rig</span>
+                    </div>
+
+                    <!-- Script (Coding Tab) -->
+                    <div class="tool-btn" id="tool-script" title="Create Script (Lua)">
+                        <div style="font-size: 18px;">📜</div>
+                        <span>Script</span>
+                    </div>
+
+                    <!-- Toolbox: preset assets & quick inserts -->
+                    <div class="tool-btn" id="tool-toolbox" title="Open Toolbox">
+                        <div style="font-size: 18px;">🧰</div>
+                        <span>Toolbox</span>
+                    </div>
+
+                    <!-- Day/Night toggle for studio lighting -->
+                    <div class="tool-btn" id="tool-studio-daynight" title="Toggle Day / Night">
+                        <div style="font-size: 18px;">🌞/🌙</div>
+                        <span>Day/Night</span>
+                    </div>
+                </div>
+                <div class="tool-group" style="margin-left: auto; margin-right: 20px;">
+                    <div class="tool-btn" id="tool-play-solo" style="width: 60px;">
+                        <div style="width: 0; height: 0; border-top: 10px solid transparent; border-bottom: 10px solid transparent; border-left: 16px solid #00cc00;"></div>
+                        <span>Play</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="studio-explorer">
+            <div class="prop-header">Explorer</div>
+            <div id="explorer-list" style="flex: 1; padding: 2px;"></div>
+        </div>
+        <div id="studio-properties">
+            <div class="prop-header">Properties</div>
+            <div class="prop-header" style="background: #eee; font-weight: normal;">Appearance</div>
+            <div class="prop-row">
+                <span class="prop-label">Color</span>
+                <input type="color" id="prop-color" class="prop-val">
+            </div>
+            <div class="prop-row">
+                <span class="prop-label">Reflectance</span>
+                <input type="number" id="prop-reflect" min="0" max="1" step="0.1" class="prop-val">
+            </div>
+             <div class="prop-row">
+                <span class="prop-label">Transparency</span>
+                <input type="number" id="prop-trans" min="0" max="1" step="0.1" class="prop-val">
+            </div>
+            
+            <div class="prop-header" style="background: #eee; font-weight: normal;">Transform</div>
+            <div class="prop-row"><span class="prop-label">Pos X</span><input id="prop-px" class="prop-val" type="number" step="0.5"></div>
+            <div class="prop-row"><span class="prop-label">Pos Y</span><input id="prop-py" class="prop-val" type="number" step="0.5"></div>
+            <div class="prop-row"><span class="prop-label">Pos Z</span><input id="prop-pz" class="prop-val" type="number" step="0.5"></div>
+
+            <div class="prop-row"><span class="prop-label">Size X</span><input id="prop-sx" class="prop-val" type="number" step="0.5"></div>
+            <div class="prop-row"><span class="prop-label">Size Y</span><input id="prop-sy" class="prop-val" type="number" step="0.5"></div>
+            <div class="prop-row"><span class="prop-label">Size Z</span><input id="prop-sz" class="prop-val" type="number" step="0.5"></div>
+
+            <div class="prop-row"><span class="prop-label">Rot X</span><input id="prop-rx" class="prop-val" type="number" step="15"></div>
+            <div class="prop-row"><span class="prop-label">Rot Y</span><input id="prop-ry" class="prop-val" type="number" step="15"></div>
+            <div class="prop-row"><span class="prop-label">Rot Z</span><input id="prop-rz" class="prop-val" type="number" step="15"></div>
+
+            <div class="prop-header" style="background: #eee; font-weight: normal;">Behavior</div>
+            <div class="prop-row">
+                <span class="prop-label">Anchored</span>
+                <input type="checkbox" id="prop-anchored">
+            </div>
+            <div class="prop-row">
+                <span class="prop-label">CanCollide</span>
+                <input type="checkbox" id="prop-collide" checked>
+            </div>
+        </div>
+    </div>
+
+    <div id="settings-menu" class="menu-overlay" style="display: none; justify-content: center; align-items: center;">
+        <div class="menu-popup" style="width: 400px;">
+            <div class="xp-title-bar">
+                <span>Properties</span>
+                <button id="btn-close-set" class="xp-btn-close">X</button>
+            </div>
+            <div class="xp-body">
+                <h2 style="color: black; margin-top: 0; font-size: 32px; text-shadow: none;">SETTINGS</h2>
+                
+                <div class="settings-row">
+                    <label>Music Volume</label>
+                    <input type="range" id="set-volume" min="0" max="100" value="60">
+                </div>
+                
+                <div class="settings-row">
+                    <label>Camera Sensitivity</label>
+                    <input type="range" id="set-sens" min="10" max="200" value="100">
+                </div>
+
+                <div class="settings-row">
+                    <label>Field of View</label>
+                    <input type="range" id="set-fov" min="30" max="110" value="70">
+                </div>
+
+                <div class="settings-row">
+                    <label>Fullscreen</label>
+                    <input type="checkbox" id="set-fullscreen" style="width: 20px; height: 20px;">
+                </div>
+
+                <div class="settings-row">
+                    <label>Invert Y-Axis</label>
+                    <input type="checkbox" id="set-invert" style="width: 20px; height: 20px;">
+                </div>
+
+                <!-- Skybox Upload -->
+                <div class="settings-row" style="flex-direction: column; align-items: flex-start; gap:6px;">
+                    <label style="width:100%; font-weight:bold;">Upload Skybox Image</label>
+                    <div style="display:flex; gap:8px; width:100%;">
+                        <input id="skybox-file" type="file" accept="image/*" style="flex:1; pointer-events: auto;">
+                        <button id="btn-skybox-reset" class="menu-btn" style="width:120px;">Reset Skybox</button>
+                    </div>
+                    <div style="font-size:11px; color:#666; margin-top:4px;">Select an image to replace the skybox faces (single image will be used for all faces).</div>
+                </div>
+
+                <button id="btn-settings-back" class="menu-btn" style="text-align: center;">BACK</button>
+            </div>
+            <div class="xp-resizer"></div>
+        </div>
+    </div>
+
+    <div id="customize-menu" class="menu-overlay" style="display: none;">
+        <div class="sidebar">
+            <div class="xp-title-bar">
+                <span>Avatar Editor</span>
+                <button id="btn-close-cust" class="xp-btn-close">X</button>
+            </div>
+            <div class="xp-body" style="align-items: flex-start; padding: 10px;">
+                <h2 style="margin-top:0; color:black; font-size:32px; text-shadow:none; align-self: center;">Customize</h2>
+                
+                <label style="color:black; font-weight:bold; display:block; text-align:center; width: 100%;">Body Colors</label>
+                <div class="avatar-vis">
+                    <div class="av-part av-head" style="background-color: #ffffff;"><input type="color" id="col-head" value="#ffffff"></div>
+                    <div class="av-part av-larm" style="background-color: #ffffff;"><input type="color" id="col-larm" value="#ffffff"></div>
+                    <div class="av-part av-torso" style="background-color: #ff0000;"><input type="color" id="col-torso" value="#ff0000"></div>
+                    <div class="av-part av-rarm" style="background-color: #ffffff;"><input type="color" id="col-rarm" value="#ffffff"></div>
+                    <div class="av-part av-lleg" style="background-color: #ffffff;"><input type="color" id="col-lleg" value="#ffffff"></div>
+                    <div class="av-part av-rleg" style="background-color: #ffffff;"><input type="color" id="col-rleg" value="#ffffff"></div>
+                </div>
+
+                <label style="color:black; font-weight:bold; display:block; margin-top:10px;">Clothing</label>
+                
+                <div style="margin-bottom: 10px; width: 100%;">
+                    <label>Face</label>
+                    <div class="file-upload-btn">
+                        Choose Face Image...
+                        <input type="file" id="file-face" accept="image/*">
+                    </div>
+                    <!-- Face gallery for selecting previously uploaded faces -->
+                    <div id="face-gallery" style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;"></div>
+                    <div style="font-size:11px; color:#666; margin-top:4px;">Uploaded faces appear here as thumbnails — click to select.</div>
+                </div>
+                
+                <div style="margin-bottom: 10px; width: 100%;">
+                    <label>Shirt</label>
+                    <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+                        <div class="file-upload-btn" style="flex:0 0 auto;">
+                            Choose Shirt Image...
+                            <input type="file" id="file-shirt" accept="image/*">
+                        </div>
+                        <!-- Inventory thumbnail for a default shirt -->
+                        <div style="display:flex; flex-direction:column; align-items:center; gap:4px; pointer-events:auto;">
+                            <img id="shirt-inventory-thumb" src="./PFP.jpg" alt="Shirt" style="width:56px; height:56px; object-fit:contain; background:#fff; border:2px solid #888; cursor:pointer;">
+                            <div style="font-size:11px; color:#666;">Use Shirt</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- New: Create Hat from scratch -->
+                <div style="margin-bottom: 10px; width: 100%;">
+                    <label>Make Hat</label>
+                    <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+                        <input id="hat-color" type="color" value="#333333" style="width:56px; height:34px; padding:0; border:1px solid #888;">
+                        <input id="hat-size" type="number" min="0.5" max="6" step="0.5" value="1.5" style="width:80px; padding:4px; box-sizing:border-box; border:2px solid #888; background:#fff;">
+                        <button id="btn-create-hat" class="menu-btn" style="width:auto; padding:6px 10px;">Create Hat</button>
+                        <button id="btn-remove-hat" class="menu-btn" style="width:auto; padding:6px 10px; background:#ffcccc;">Remove Hat</button>
+                        <button id="btn-open-hat-editor" class="menu-btn" style="width:auto; padding:6px 10px; background:#cfeeff;">Open Hat Editor</button>
+                        <button id="btn-use-cap-inv" class="menu-btn" style="width:auto; padding:6px 10px; background:#c0ffd8;">Use Baseball Cap</button>
+                    </div>
+                    <div style="font-size:11px; color:#666; margin-top:6px;">Create a simple hat that attaches to your head; it will be saved with your appearance. Use the Hat Editor to fine-tune position/scale/rotation.</div>
+                </div>
+
+                <!-- Hat Editor Modal -->
+                <div id="hat-editor" class="xp-window" style="display:none; width: 360px;">
+                    <div class="xp-title-bar">
+                        <span>Hat Editor</span>
+                        <button id="btn-close-hat-editor" class="xp-btn-close">X</button>
+                    </div>
+                    <div class="xp-body" style="align-items: stretch;">
+                        <div style="display:flex; gap:8px; align-items:center; justify-content:center;">
+                            <label style="font-weight:bold;">Color</label>
+                            <input id="hat-edit-color" type="color" value="#333333">
+                            <label style="font-weight:bold;">Base Size</label>
+                            <input id="hat-edit-size" type="range" min="0.5" max="6" step="0.1" value="1.5" style="flex:1;">
+                        </div>
+
+                        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+                            <div style="flex:1;">
+                                <label style="font-weight:bold;">Offset X</label>
+                                <input id="hat-off-x" type="range" min="-1.5" max="1.5" step="0.01" value="0" style="width:100%;">
+                            </div>
+                            <div style="flex:1;">
+                                <label style="font-weight:bold;">Offset Y</label>
+                                <input id="hat-off-y" type="range" min="-1.0" max="2.0" step="0.01" value="0.3" style="width:100%;">
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+                            <div style="flex:1;">
+                                <label style="font-weight:bold;">Offset Z</label>
+                                <input id="hat-off-z" type="range" min="-1.5" max="1.5" step="0.01" value="0" style="width:100%;">
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+                            <div style="flex:1;">
+                                <label style="font-weight:bold;">Rot X</label>
+                                <input id="hat-rot-x" type="range" min="-180" max="180" step="1" value="0" style="width:100%;">
+                            </div>
+                            <div style="flex:1;">
+                                <label style="font-weight:bold;">Rot Y</label>
+                                <input id="hat-rot-y" type="range" min="-180" max="180" step="1" value="0" style="width:100%;">
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+                            <div style="flex:1;">
+                                <label style="font-weight:bold;">Rot Z</label>
+                                <input id="hat-rot-z" type="range" min="-180" max="180" step="1" value="0" style="width:100%;">
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:8px; margin-top:12px; justify-content:center;">
+                            <button id="hat-preview-apply" class="menu-btn">Apply Preview</button>
+                            <button id="hat-preview-save" class="menu-btn" style="background:#00cc00;color:white;">Save Hat</button>
+                            <button id="hat-preview-cancel" class="menu-btn" style="background:#ffcccc;">Cancel</button>
+                        </div>
+
+                        <div style="font-size:12px; color:#666; margin-top:8px;">Preview is attached to the default head; Save will create or update your avatar hat and persist it.</div>
+                    </div>
+                    <div class="xp-resizer"></div>
+                </div>
+
+                <button id="btn-cust-reset" class="menu-btn" style="background: #ffcccc; margin-bottom: 5px;">RESET TO DEFAULT</button>
+                <button id="btn-cust-reset" class="menu-btn" style="background: #ffcccc; margin-bottom: 5px;">RESET TO DEFAULT</button>
+                <button id="btn-cust-done" class="menu-btn" style="background: #c0c0c0; border: 2px solid; margin-top: auto;">DONE</button>
+            </div>
+            <div class="xp-resizer"></div>
+        </div>
+    </div>
+
+    <img id="custom-cursor" src="./ArrowFarCursor.png">
+    
+    <div id="chat-container">
+        <div id="chat-history">
+        </div>
+        <div id="chat-input-row">
+            <input id="chat-input" type="text" placeholder="Press '/' to chat" maxlength="128">
+        </div>
+    </div>
+
+
+    <script type="module" src="./src/main.js"></script>
+    <script>
+        // Helper to update visual color blocks
+        const ids = ['col-head', 'col-torso', 'col-larm', 'col-rarm', 'col-lleg', 'col-rleg'];
+        ids.forEach(id => {
+            const el = document.getElementById(id);
+            el.addEventListener('input', (e) => {
+                el.parentElement.style.backgroundColor = e.target.value;
+            });
+        });
+    </script>
+</body>
+</html>
+
