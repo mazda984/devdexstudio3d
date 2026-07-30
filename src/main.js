@@ -326,16 +326,24 @@ room.initialize().then(() => {
     console.log("Multiplayer connected");
 });
 
-// If this page was opened via a "Publish" play link, try to load the game it
-// points to and jump straight in instead of just sitting on the empty start menu.
-// Two kinds of links are supported:
-//   - Shared links:     "?play=Name&bucket=xxx&rid=yyy"  -> fetched from the remote store, works for anyone.
-//   - Local-only links: "?play=Name&id=123"              -> only works in the browser that published it.
+// The main start menu (launcher) is no longer shown at all. Opening this page now does
+// exactly one of two things:
+//   - A "Publish" play link is present ("?play=...") -> load and jump straight into that
+//     saved/shared game (same as before).
+//   - No play link -> skip the menu entirely and go straight into Devdex Studio (the editor).
 (async function handlePlayLinkParam() {
     try {
         const params = new URLSearchParams(window.location.search);
         const playName = params.get('play');
-        if (!playName) return;
+
+        if (!playName) {
+            // No play link: go straight into Studio instead of showing the start menu.
+            setTimeout(() => {
+                const studioBtn = document.getElementById('btn-studio');
+                if (studioBtn) studioBtn.click();
+            }, 50);
+            return;
+        }
 
         const bucket = params.get('bucket');
         const rid = params.get('rid');
@@ -2739,10 +2747,28 @@ function startGame(mapName, mapData = null, opts = {}) {
     
     currentMapName = mapName; // Set map name for sync
 
-    // Generate a play URL for this run and push it into history so the tab reflects the running game.
+    // Keep the address bar reflecting a playable URL for this game. Importantly, if we got
+    // here via a real Publish share link ("?play=name&bucket=x&rid=y"), we must NOT overwrite
+    // those params - doing so used to silently turn the shareable link into a broken one the
+    // moment the game loaded (reloading or re-copying the URL afterwards would then fail).
     try {
-        const runId = Date.now();
-        const playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${runId}`;
+        const existingParams = new URLSearchParams(window.location.search);
+        const existingBucket = existingParams.get('bucket');
+        const existingRid = existingParams.get('rid');
+        const existingId = existingParams.get('id');
+
+        let playUrl;
+        if (existingBucket && existingRid) {
+            // Already a real shareable link - keep it exactly as-is.
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${existingBucket}&rid=${existingRid}`;
+        } else if (existingId) {
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${existingId}`;
+        } else {
+            // No share info in the current URL (e.g. played from the in-menu Play list) -
+            // just tag it with a fresh run id, purely cosmetic for the address bar.
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${Date.now()}`;
+        }
+
         try { localStorage.setItem('nblox_map_url_' + mapName, playUrl); } catch(e){}
         try { history.replaceState({}, `${mapName} - Play`, playUrl); } catch(e){}
     } catch (err) {
