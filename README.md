@@ -26,3 +26,13 @@ Bu depoda ikisi de düzeltildi:
 ## Gerçek çoklu oyunculuyu geri getirmek
 
 Eğer gerçek çoklu oyuncu (başka oyuncuları görme, gerçek zamanlı sohbet vb.) istiyorsanız, `index.html` içindeki polyfill'in yerine kendi WebSocket sunucunuza bağlanan gerçek bir istemci kodu yazmanız gerekir (ör. Node.js + `ws` kütüphanesi ile basit bir oda/sunucu kurup, `subscribePresence`, `send`, `updatePresence` gibi metodları o sunucuya bağlayarak). Bu, statik GitHub Pages barındırmasının dışında ayrı bir sunucu (ör. Render, Railway, Fly.io) gerektirir çünkü GitHub Pages sadece statik dosya sunar, WebSocket sunucusu çalıştıramaz.
+
+## Publish (yayınlama) linkinin başkalarıyla paylaşılabilir olması
+
+Önceden "Publish" ile oluşturulan link sadece kaydı yapan tarayıcının `localStorage`'ında çalışıyordu; başka birine göndermek işe yaramıyordu. Artık Publish butonu, kaydedilen haritayı ücretsiz bir genel key-value servisine ([kvdb.io](https://kvdb.io)) da yüklemeye çalışıyor ve paylaşılan linke bu verinin adresini (`bucket` ve `rid` parametreleri) ekliyor. Böylece linki alan herkes, tarayıcısında o harita kayıtlı olmasa bile oyunu doğrudan indirip oynayabiliyor.
+
+Notlar:
+- Bu üçüncü taraf bir ücretsiz servis olduğu için garantili bir SLA'sı yoktur; servis geçici olarak erişilemezse Publish otomatik olarak eski "sadece bu tarayıcıda çalışır" moduna düşer ve kullanıcıyı bilgilendirir.
+- Çok büyük haritalar (özellikle çok fazla/uzun ses dosyası gömülüyse) kvdb.io'nun boyut sınırını aşabilir; bu durumda da aynı şekilde yerel moda düşülür.
+- Kalıcı ve size ait bir çözüm istiyorsanız (ör. kendi veritabanınız/Firebase/Supabase), bunu da ekleyebilirim.
+

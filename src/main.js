@@ -35,6 +35,44 @@ import { boxUnwrapUVs, surfaceManager, createFaceTexture, createTorsoTexture } f
 
 const room = new WebsimSocket();
 
+// --- Remote sharing storage -------------------------------------------------
+// This game itself is just static files (no server of its own), so to let a
+// "Publish" link work for OTHER people (not just the browser that published it)
+// we push a copy of the saved map to a free public key-value store (kvdb.io)
+// and embed the bucket + key in the shareable URL. Anyone opening that URL can
+// then fetch the exact same data back, with no login/backend of our own needed.
+// If this ever fails (offline, service down, map too large, etc.) publishing
+// still works locally — it just falls back to "only works in this browser".
+const KVDB_BASE = 'https://kvdb.io';
+
+async function getOrCreateShareBucket() {
+    let bucket = null;
+    try { bucket = localStorage.getItem('nblox_share_bucket'); } catch (e) {}
+    if (bucket) return bucket;
+
+    const res = await fetch(`${KVDB_BASE}/`, { method: 'POST' });
+    if (!res.ok) throw new Error('Could not create share bucket (status ' + res.status + ')');
+    bucket = (await res.text()).trim();
+    try { localStorage.setItem('nblox_share_bucket', bucket); } catch (e) {}
+    return bucket;
+}
+
+async function shareMapRemotely(mapName, saveObj) {
+    const bucket = await getOrCreateShareBucket();
+    const key = 'map_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: saveObj.data });
+    const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: payload });
+    if (!res.ok) throw new Error('Could not upload map for sharing (status ' + res.status + ')');
+    return { bucket, key };
+}
+
+async function fetchSharedMap(bucket, key) {
+    const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`);
+    if (!res.ok) throw new Error('Shared map not found (status ' + res.status + ')');
+    return JSON.parse(await res.text());
+}
+// -----------------------------------------------------------------------------
+
 const UI_ZOOM = 0.75;
 
 const scene = new THREE.Scene();
@@ -275,6 +313,52 @@ const remotePlayers = {}; // Changed to Object for ID mapping
 room.initialize().then(() => {
     console.log("Multiplayer connected");
 });
+
+// If this page was opened via a "Publish" play link, try to load the game it
+// points to and jump straight in instead of just sitting on the empty start menu.
+// Two kinds of links are supported:
+//   - Shared links:     "?play=Name&bucket=xxx&rid=yyy"  -> fetched from the remote store, works for anyone.
+//   - Local-only links: "?play=Name&id=123"              -> only works in the browser that published it.
+(async function handlePlayLinkParam() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const playName = params.get('play');
+        if (!playName) return;
+
+        const bucket = params.get('bucket');
+        const rid = params.get('rid');
+
+        // 1. Try the shared remote copy first, if this link has one.
+        if (bucket && rid) {
+            try {
+                const shared = await fetchSharedMap(bucket, rid);
+                if (shared && shared.data) {
+                    setTimeout(() => startGame(shared.name || playName, shared.data), 300);
+                    return;
+                }
+            } catch (e) {
+                console.warn('Failed to fetch shared map, falling back to local copy:', e);
+            }
+        }
+
+        // 2. Fall back to whatever is saved locally under this name.
+        let saves = [];
+        try {
+            const raw = localStorage.getItem('nblox_maps');
+            if (raw) saves = JSON.parse(raw);
+        } catch (e) {}
+
+        const save = saves.find(s => s.name === playName);
+        if (save) {
+            setTimeout(() => startGame(save.name, save.data), 300);
+        } else {
+            console.warn(`No saved game named "${playName}" found (remote fetch failed and it's not in this browser's local storage).`);
+            addChatMessage && addChatMessage('System', `Couldn't load saved game "${playName}". The share link may have expired, or this browser doesn't have it saved locally.`);
+        }
+    } catch (e) {
+        console.warn('Failed to handle play link param:', e);
+    }
+})();
 
 room.subscribePresence((presence) => {
     // Sync remote players
@@ -1307,23 +1391,20 @@ Object.values(propInputs).forEach(input => {
 });
 
 
-document.getElementById('tool-publish').onclick = () => {
+document.getElementById('tool-publish').onclick = async () => {
     playSwitch();
-    // Prompt for name but allow default
     let defaultName = "";
     if (editingGameName) {
         defaultName = isRemixMode ? `Remix of ${editingGameName}` : editingGameName;
     }
-    
-    // Validate map name: only letters and spaces, 1-30 characters
+
     const isValidMapName = (name) => {
         if (!name) return false;
-        // Allow letters (A-Z, a-z) and spaces, length 1..30
         return /^[A-Za-z\s]{1,30}$/.test(name.trim());
     };
 
     let mapName = prompt("Enter a name for your game (letters and spaces only, max 30 chars):", defaultName);
-    if (mapName === null) return; // user cancelled
+    if (mapName === null) return;
 
     mapName = mapName.trim();
 
@@ -1341,129 +1422,72 @@ document.getElementById('tool-publish').onclick = () => {
         data: data,
         thumbnail: './Backdrop.gif'
     };
-    
-    // Get existing
+
     let saves = [];
     try {
         const raw = localStorage.getItem('nblox_maps');
         if (raw) saves = JSON.parse(raw);
     } catch(e) {}
 
-    // Overwrite if exists (by name? usually ID is better but name works for simple)
     const idx = saves.findIndex(s => s.name === mapName);
     if (idx >= 0) saves[idx] = saveObj;
     else saves.push(saveObj);
-    
+
     try {
         localStorage.setItem('nblox_maps', JSON.stringify(saves));
-        // Save a thumbnail entry for launcher previews
         try { localStorage.setItem('nblox_map_thumb_' + mapName, './Backdrop.gif'); } catch(e) {}
-        
-        // Update current editing context to the new name so subsequent saves default correctly
-        editingGameName = mapName;
-        isRemixMode = false; // Once saved, it's no longer a pending remix, it's your game
 
-        // Generate a persistent play URL for this map and store it locally.
-        // Create a randomized domain-like host (free vanity-style local mapping)
+        editingGameName = mapName;
+        isRemixMode = false;
+
         try {
             const id = Date.now();
-            // Generate a reasonably long random string using base36 + extra entropy
-            const rand = (() => {
-                const a = Math.random().toString(36).slice(2, 10);
-                const b = Math.random().toString(36).slice(2, 10);
-                return (a + b).replace(/[^a-z0-9]/g, '').slice(0, 20);
-            })();
 
-            const fakeDomain = `${rand}.com`; // legacy fake-domain kept for mapping, but final URL will use current origin
-            // Construct a play URL that uses the current site's origin/path so the link works in a new tab.
-            // We still keep the fakeDomain mapping locally for backward compatibility, but the actual URL shown to users
-            // will point to this same site with query params identifying the saved map.
-            const playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${id}`;
-
-            // Store mapping locally so the launcher can resolve the domain back to saved data
+            let shareInfo = null;
             try {
-                localStorage.setItem('nblox_map_url_' + mapName, playUrl);
-                // Also store reverse mapping: domain -> map meta
-                const domainMapKey = 'nblox_domain_map';
-                const domainMapRaw = localStorage.getItem(domainMapKey) || '{}';
-                const domainMap = JSON.parse(domainMapRaw);
-                domainMap[fakeDomain] = { mapName: mapName, id: id, savedAt: Date.now() };
-                localStorage.setItem(domainMapKey, JSON.stringify(domainMap));
-            } catch (e) {
-                console.warn('Failed to persist fake domain mapping:', e);
+                shareInfo = await shareMapRemotely(mapName, saveObj);
+            } catch (shareErr) {
+                console.warn('Remote share failed, falling back to local-only link:', shareErr);
             }
 
-            // Update browser history to show a playable URL (local mapping)
+            let playUrl;
+            if (shareInfo) {
+                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${shareInfo.bucket}&rid=${shareInfo.key}`;
+            } else {
+                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${id}`;
+            }
+
+            try {
+                localStorage.setItem('nblox_map_url_' + mapName, playUrl);
+            } catch (e) {
+                console.warn('Failed to persist map url mapping:', e);
+            }
+
             try { history.replaceState({}, `${mapName} - Play`, playUrl); } catch(e){}
 
             addChatMessage('System', `Play URL created: ${playUrl}`);
 
-            // Open a new tab that itself generates a nested URL and then navigates there.
             try {
-                const w = window.open('', '_blank', 'noopener,noreferrer');
-                if (w) {
-                    // Build a small page that will create a second nested URL and navigate to it.
-                    const nestedScript = `
-                        (function(){
-                            try {
-                                // create a second random token for the nested URL
-                                const nrand = (Math.random().toString(36).slice(2,12) + Math.random().toString(36).slice(2,8)).replace(/[^a-z0-9]/g,'').slice(0,20);
-                                const nestedDomain = nrand + '.com';
-                                const nestedUrl = 'https://' + nestedDomain + '/play/${encodeURIComponent(mapName)}/${id}';
-                                // Persist mapping in the opener's localStorage if available
-                                try {
-                                    if (window.opener && window.opener.localStorage) {
-                                        const domainMapKey = 'nblox_domain_map';
-                                        const raw = window.opener.localStorage.getItem(domainMapKey) || '{}';
-                                        const domainMap = JSON.parse(raw);
-                                        domainMap[nestedDomain] = { mapName: "${mapName}", id: ${id}, savedAt: Date.now() };
-                                        window.opener.localStorage.setItem(domainMapKey, JSON.stringify(domainMap));
-                                    }
-                                } catch(e){}
-                                // Update this tab's history (visual) then navigate
-                                try { history.replaceState({}, '${mapName} - Play', nestedUrl); } catch(e){}
-                                // small delay to make the transition visible
-                                setTimeout(function(){ window.location.href = nestedUrl; }, 120);
-                            } catch(err) {
-                                console.warn('Nested URL generation failed', err);
-                            }
-                        })();
-                    `;
-                    const html = '<!doctype html><html><head><meta charset="utf-8"><title>Opening...</title></head><body><div style="font-family: sans-serif; color:#222; padding:20px;">Preparing play link...</div><script>' + nestedScript + '<\/script></body></html>';
-                    w.document.open();
-                    w.document.write(html);
-                    w.document.close();
-                } else {
-                    // Fallback to direct anchor open if popup blocked
-                    const a = document.createElement('a');
-                    a.href = playUrl;
-                    a.target = '_blank';
-                    a.rel = 'noopener noreferrer';
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                }
+                const a = document.createElement('a');
+                a.href = playUrl;
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
             } catch (e) {
-                console.warn('Failed to open nested play URL in new tab:', e);
-                // Final fallback: open anchor directly
-                try {
-                    const a = document.createElement('a');
-                    a.href = playUrl;
-                    a.target = '_blank';
-                    a.rel = 'noopener noreferrer';
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                } catch (ee) {
-                    console.warn('Failed fallback anchor open:', ee);
-                }
+                console.warn('Failed to open play URL in new tab:', e);
             }
-            // Show a friendly toast/alert with the free URL
-            alert(`Your free play URL:\n${playUrl}\n\nShare this URL to let others open your game locally.`);
+
+            if (shareInfo) {
+                alert(`Your play URL:\n${playUrl}\n\nThis link can be shared with anyone \u2014 opening it will download "${mapName}" and start it automatically.`);
+            } else {
+                alert(`Your play URL:\n${playUrl}\n\nCouldn't reach the sharing service, so this link only works in this same browser (it reads the saved game from local storage). Try publishing again later to get a shareable link.`);
+            }
         } catch (urlErr) {
             console.warn('Failed to generate play URL:', urlErr);
         }
-        
+
         alert("Game Published Successfully!");
     } catch (e) {
         alert("Failed to save! Game size is too large (likely the music). Try a smaller song.");
