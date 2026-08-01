@@ -45,29 +45,34 @@ const room = new WebsimSocket();
 // still works locally — it just falls back to "only works in this browser".
 const KVDB_BASE = 'https://kvdb.io';
 
-async function getOrCreateShareBucket() {
-    let bucket = null;
-    try { bucket = localStorage.getItem('nblox_share_bucket'); } catch (e) {}
-    if (bucket) return bucket;
-
-    // kvdb.io requires an "email" field in the bucket-creation request (it doesn't need to be
-    // real/verified, but the request is rejected without it). This was previously missing,
-    // which meant bucket creation ALWAYS silently failed and Publish ALWAYS fell back to the
-    // local-only link - real cross-browser sharing never actually worked until this fix.
+async function createShareBucket() {
+    console.log('[share] Creating a new kvdb.io bucket...');
     const res = await fetch(`${KVDB_BASE}/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'email=' + encodeURIComponent('devdex-anon-' + Date.now() + '@example.com')
     });
-    if (!res.ok) throw new Error('Could not create share bucket (status ' + res.status + ')');
-    bucket = (await res.text()).trim();
+    if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        throw new Error(`Could not create share bucket (status ${res.status}): ${bodyText}`);
+    }
+    const bucket = (await res.text()).trim();
+    console.log('[share] Bucket created:', bucket);
     try { localStorage.setItem('nblox_share_bucket', bucket); } catch (e) {}
     return bucket;
 }
 
+async function getOrCreateShareBucket() {
+    let bucket = null;
+    try { bucket = localStorage.getItem('nblox_share_bucket'); } catch (e) {}
+    if (bucket) {
+        console.log('[share] Using cached bucket:', bucket);
+        return bucket;
+    }
+    return await createShareBucket();
+}
+
 async function shareMapRemotely(mapName, saveObj) {
-    const bucket = await getOrCreateShareBucket();
-    const key = 'map_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
     const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: saveObj.data });
     // Base64-encode before upload so nothing in the JSON (quotes, unicode, newlines)
     // can get mangled/escaped/truncated by the third-party storage layer in transit.
@@ -79,8 +84,23 @@ async function shareMapRemotely(mapName, saveObj) {
         throw new Error(`Map is too large to share remotely (${Math.round(encoded.length/1024)}KB, limit ~16KB). Try a simpler map with fewer objects.`);
     }
 
-    const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: encoded });
-    if (!res.ok) throw new Error('Could not upload map for sharing (status ' + res.status + ')');
+    const key = 'map_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    let bucket = await getOrCreateShareBucket();
+
+    let res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: encoded });
+    if (!res.ok && bucket) {
+        // The cached bucket might be stale/invalid (e.g. left over from before an API fix).
+        // Try once more with a guaranteed-fresh bucket before giving up.
+        console.warn(`[share] Upload with cached bucket failed (status ${res.status}). Retrying with a fresh bucket...`);
+        try { localStorage.removeItem('nblox_share_bucket'); } catch (e) {}
+        bucket = await createShareBucket();
+        res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: encoded });
+    }
+    if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        throw new Error(`Could not upload map for sharing (status ${res.status}): ${bodyText}`);
+    }
+    console.log('[share] Map uploaded OK. bucket=', bucket, 'key=', key);
     return { bucket, key };
 }
 
