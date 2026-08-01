@@ -58,12 +58,21 @@ async function encodeMapForUrl(mapName, saveObj) {
     zip.file('d', payload);
     // DEFLATE compression keeps the URL as short as reasonably possible.
     const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE', compressionOptions: { level: 9 } });
-    // Base64 can contain '+', '/', '=' which need escaping to survive safely in a URL query param.
-    return encodeURIComponent(base64);
+    // Standard base64 uses '+', '/', '=' which some chat apps (WhatsApp, Discord, etc.)
+    // are known to mangle when auto-linkifying long URLs, even after encodeURIComponent
+    // round-trips through the browser address bar. Converting to URL-safe base64
+    // (RFC 4648 §5: '+'->'-', '/'->'_', drop '=' padding) avoids those characters
+    // entirely, so the link survives being copy/pasted or sent through any app untouched.
+    const urlSafe = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return urlSafe;
 }
 
 async function decodeMapFromUrl(encodedParam) {
-    const base64 = decodeURIComponent(encodedParam);
+    // Trim any stray whitespace/newlines a chat app might have introduced, then convert
+    // back from URL-safe base64 to standard base64 (restoring '=' padding as needed).
+    let cleaned = decodeURIComponent(encodedParam).trim().replace(/\s+/g, '');
+    let base64 = cleaned.replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4 !== 0) base64 += '=';
     const zip = await JSZip.loadAsync(base64, { base64: true });
     const file = zip.file('d');
     if (!file) throw new Error('Shared link data is malformed (missing inner file).');
