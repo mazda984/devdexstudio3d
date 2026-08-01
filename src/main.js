@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import nipplejs from 'nipplejs';
+import JSZip from 'jszip';
 import { World } from './World.js';
 import { Player, createPlayerMesh } from './Player.js';
 import { RemotePlayer } from './RemotePlayer.js';
@@ -43,81 +44,33 @@ const room = new WebsimSocket();
 // then fetch the exact same data back, with no login/backend of our own needed.
 // If this ever fails (offline, service down, map too large, etc.) publishing
 // still works locally — it just falls back to "only works in this browser".
-const KVDB_BASE = 'https://kvdb.io';
-
-async function createShareBucket() {
-    console.log('[share] Creating a new kvdb.io bucket...');
-    const res = await fetch(`${KVDB_BASE}/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'email=' + encodeURIComponent('devdex-anon-' + Date.now() + '@example.com')
-    });
-    if (!res.ok) {
-        const bodyText = await res.text().catch(() => '');
-        throw new Error(`Could not create share bucket (status ${res.status}): ${bodyText}`);
-    }
-    const bucket = (await res.text()).trim();
-    console.log('[share] Bucket created:', bucket);
-    try { localStorage.setItem('nblox_share_bucket', bucket); } catch (e) {}
-    return bucket;
-}
-
-async function getOrCreateShareBucket() {
-    let bucket = null;
-    try { bucket = localStorage.getItem('nblox_share_bucket'); } catch (e) {}
-    if (bucket) {
-        console.log('[share] Using cached bucket:', bucket);
-        return bucket;
-    }
-    return await createShareBucket();
-}
-
-async function shareMapRemotely(mapName, saveObj) {
+// --- Remote sharing storage -------------------------------------------------
+// Publish links used to depend on a free third-party key-value store (kvdb.io) to make a
+// link work for people other than the one who published it. That dependency turned out to
+// be unreliable in practice (bucket creation / CORS / quota issues that were hard to diagnose
+// from outside), so sharing now works differently and needs NO external service at all:
+// the entire map is compressed and embedded directly inside the URL itself. Whoever opens
+// the link gets the exact bytes back out of the URL - nothing to upload, nothing that can be
+// "down", nothing that can silently fail.
+async function encodeMapForUrl(mapName, saveObj) {
     const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: saveObj.data });
-    // Base64-encode before upload so nothing in the JSON (quotes, unicode, newlines)
-    // can get mangled/escaped/truncated by the third-party storage layer in transit.
-    const encoded = btoa(unescape(encodeURIComponent(payload)));
-
-    // kvdb.io caps stored values at 16KB. Fail with a clear reason instead of a confusing
-    // HTTP error if a map is too big/detailed to share remotely this way.
-    if (encoded.length > 16000) {
-        throw new Error(`Map is too large to share remotely (${Math.round(encoded.length/1024)}KB, limit ~16KB). Try a simpler map with fewer objects.`);
-    }
-
-    const key = 'map_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-    let bucket = await getOrCreateShareBucket();
-
-    let res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: encoded });
-    if (!res.ok && bucket) {
-        // The cached bucket might be stale/invalid (e.g. left over from before an API fix).
-        // Try once more with a guaranteed-fresh bucket before giving up.
-        console.warn(`[share] Upload with cached bucket failed (status ${res.status}). Retrying with a fresh bucket...`);
-        try { localStorage.removeItem('nblox_share_bucket'); } catch (e) {}
-        bucket = await createShareBucket();
-        res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: encoded });
-    }
-    if (!res.ok) {
-        const bodyText = await res.text().catch(() => '');
-        throw new Error(`Could not upload map for sharing (status ${res.status}): ${bodyText}`);
-    }
-    console.log('[share] Map uploaded OK. bucket=', bucket, 'key=', key);
-    return { bucket, key };
+    const zip = new JSZip();
+    zip.file('d', payload);
+    // DEFLATE compression keeps the URL as short as reasonably possible.
+    const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE', compressionOptions: { level: 9 } });
+    // Base64 can contain '+', '/', '=' which need escaping to survive safely in a URL query param.
+    return encodeURIComponent(base64);
 }
 
-async function fetchSharedMap(bucket, key) {
-    const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`);
-    if (!res.ok) throw new Error('Shared map not found (status ' + res.status + ')');
-    const raw = (await res.text()).trim();
-    let jsonText;
-    try {
-        // Expected path: value is our base64-encoded payload.
-        jsonText = decodeURIComponent(escape(atob(raw)));
-    } catch (e) {
-        // Fallback for any older/non-base64 entries: treat as plain JSON text.
-        jsonText = raw;
-    }
-    return JSON.parse(jsonText);
+async function decodeMapFromUrl(encodedParam) {
+    const base64 = decodeURIComponent(encodedParam);
+    const zip = await JSZip.loadAsync(base64, { base64: true });
+    const file = zip.file('d');
+    if (!file) throw new Error('Shared link data is malformed (missing inner file).');
+    const text = await file.async('string');
+    return JSON.parse(text);
 }
+// -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 
 const UI_ZOOM = 0.75;
@@ -380,19 +333,21 @@ room.initialize().then(() => {
             return;
         }
 
+        const dataParam = params.get('data');
         const bucket = params.get('bucket');
         const rid = params.get('rid');
 
-        // 1. Try the shared remote copy first, if this link has one.
-        if (bucket && rid) {
+        // 1. New self-contained links: the map is embedded directly in the URL. No network
+        //    call needed at all, so this can never fail due to an external service.
+        if (dataParam) {
             try {
-                const shared = await fetchSharedMap(bucket, rid);
-                if (shared && shared.data) {
-                    setTimeout(() => startGame(shared.name || playName, shared.data, { minimalHud: true }), 300);
+                const decoded = await decodeMapFromUrl(dataParam);
+                if (decoded && decoded.data) {
+                    setTimeout(() => startGame(decoded.name || playName, decoded.data, { minimalHud: true }), 300);
                     return;
                 }
             } catch (e) {
-                console.warn('Failed to fetch shared map, falling back to local copy:', e);
+                console.warn('Failed to decode embedded map data from URL:', e);
             }
         }
 
@@ -407,8 +362,8 @@ room.initialize().then(() => {
         if (save) {
             setTimeout(() => startGame(save.name, save.data, { minimalHud: true }), 300);
         } else {
-            console.warn(`No saved game named "${playName}" found (remote fetch failed and it's not in this browser's local storage).`);
-            addChatMessage && addChatMessage('System', `Couldn't load saved game "${playName}". The share link may have expired, or this browser doesn't have it saved locally.`);
+            console.warn(`No saved game named "${playName}" found (and it's not in this browser's local storage).`);
+            addChatMessage && addChatMessage('System', `Couldn't load saved game "${playName}". The share link may be malformed, or this browser doesn't have it saved locally.`);
         }
     } catch (e) {
         console.warn('Failed to handle play link param:', e);
@@ -1499,17 +1454,24 @@ document.getElementById('tool-publish').onclick = async () => {
         try {
             const id = Date.now();
 
-            let shareInfo = null;
+            let encodedData = null;
             try {
-                shareInfo = await shareMapRemotely(mapName, saveObj);
+                encodedData = await encodeMapForUrl(mapName, saveObj);
             } catch (shareErr) {
-                console.warn('Remote share failed, falling back to local-only link:', shareErr);
+                console.warn('Failed to encode map for a shareable link, falling back to local-only link:', shareErr);
             }
 
             let playUrl;
-            if (shareInfo) {
-                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${shareInfo.bucket}&rid=${shareInfo.key}`;
+            const MAX_URL_DATA_LENGTH = 6000; // keep the URL a reasonable length
+            if (encodedData && encodedData.length <= MAX_URL_DATA_LENGTH) {
+                // Self-contained shareable link: the map itself lives in the URL, so this
+                // works for ANYONE who opens it, with no server/service dependency at all.
+                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${encodedData}`;
             } else {
+                if (encodedData) {
+                    console.warn(`Map is too large to embed in a URL (${Math.round(encodedData.length/1024)}KB, limit ~${Math.round(MAX_URL_DATA_LENGTH/1024)}KB) - falling back to a local-only link.`);
+                }
+                // Local-only fallback link (only opens correctly in this same browser).
                 playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${id}`;
             }
 
@@ -1520,8 +1482,6 @@ document.getElementById('tool-publish').onclick = async () => {
             }
 
             try { history.replaceState({}, `${mapName} - Play`, playUrl); } catch(e){}
-
-            addChatMessage('System', `Play URL created: ${playUrl}`);
 
             try {
                 const a = document.createElement('a');
@@ -1535,10 +1495,10 @@ document.getElementById('tool-publish').onclick = async () => {
                 console.warn('Failed to open play URL in new tab:', e);
             }
 
-            if (shareInfo) {
-                alert(`Your play URL:\n${playUrl}\n\nThis link can be shared with anyone \u2014 opening it will download "${mapName}" and start it automatically.`);
+            if (playUrl.includes('&data=')) {
+                alert(`Your play URL:\n${playUrl}\n\nThis link can be shared with anyone \u2014 opening it will load "${mapName}" and start it automatically. No server needed, so it will always work.`);
             } else {
-                alert(`Your play URL:\n${playUrl}\n\nCouldn't reach the sharing service, so this link only works in this same browser (it reads the saved game from local storage). Try publishing again later to get a shareable link.`);
+                alert(`Your play URL:\n${playUrl}\n\nThis map is a bit too large to fit in a shareable link, so this link only works in this same browser (it reads the saved game from local storage).`);
             }
         } catch (urlErr) {
             console.warn('Failed to generate play URL:', urlErr);
@@ -2788,12 +2748,16 @@ function startGame(mapName, mapData = null, opts = {}) {
     // moment the game loaded (reloading or re-copying the URL afterwards would then fail).
     try {
         const existingParams = new URLSearchParams(window.location.search);
+        const existingData = existingParams.get('data');
         const existingBucket = existingParams.get('bucket');
         const existingRid = existingParams.get('rid');
         const existingId = existingParams.get('id');
 
         let playUrl;
-        if (existingBucket && existingRid) {
+        if (existingData) {
+            // Self-contained link - keep it exactly as-is.
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${existingData}`;
+        } else if (existingBucket && existingRid) {
             // Already a real shareable link - keep it exactly as-is.
             playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${existingBucket}&rid=${existingRid}`;
         } else if (existingId) {
