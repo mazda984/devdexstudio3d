@@ -2036,6 +2036,18 @@ document.getElementById('tool-delete').onclick = () => {
     }
 };
 
+// Puts every RigBot back exactly where it started (undoing falling/chasing movement
+// from the PLAYING/TEST session), called whenever a play/test session stops.
+function resetAllRigsToSpawn() {
+    if (!world || !world.items) return;
+    world.items.forEach(rig => {
+        if (!rig.userData || !rig.userData.isRig) return;
+        if (rig.userData.spawnPos) rig.position.copy(rig.userData.spawnPos);
+        if (rig.userData.spawnRot) rig.rotation.copy(rig.userData.spawnRot);
+        rig.userData.velocityY = 0;
+    });
+}
+
 // Recolors a RigBot's torso (its most visible part) to the given hex color, and keeps
 // the saved serial data in sync so the color survives save/publish/reload.
 function applyRigAppearance(rigMesh, hexColor) {
@@ -2091,6 +2103,11 @@ async function spawnRig(savedData = null) {
         const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -8).applyQuaternion(camera.quaternion));
         rigMesh.position.copy(pos);
     }
+    // Remember where it started so Stop/Exit can put it back exactly where it was,
+    // undoing any falling/chasing movement that happened during PLAYING/TEST.
+    rigMesh.userData.spawnPos = rigMesh.position.clone();
+    rigMesh.userData.spawnRot = rigMesh.rotation.clone();
+    rigMesh.userData.velocityY = 0;
     if (attacksPlayer && !world.attackingRigs.includes(rigMesh)) world.attackingRigs.push(rigMesh);
 
     // Add to the world explorer so it's selectable in studio, but do NOT animate or add AI movement.
@@ -2451,6 +2468,7 @@ btnStopTest.onclick = () => {
     player.mesh.visible = false;
     btnStopTest.style.display = 'none';
     studioGui.style.display = 'flex';
+    resetAllRigsToSpawn();
     // Restore selection?
     if (studioSelected) transformControl.attach(studioSelected);
 };
@@ -3413,6 +3431,7 @@ btnExit.onclick = () => {
     gameState = 'MENU';
     minimalHudActive = false;
     if (world.mapGroup) world.mapGroup.visible = false;
+    resetAllRigsToSpawn();
 
     // Clean the address bar back to the base URL, so leaving actually leaves:
     // reloading the page (or copying the URL) won't jump straight back into
@@ -4965,17 +4984,39 @@ function updatePlaying(dt) {
         isDead: player.isDead
     });
 
-    // RigBot AI: any RigBot with "Attacks Player" enabled slowly walks toward the player.
-    if (world.attackingRigs && world.attackingRigs.length > 0 && !player.isDead) {
+    // RigBot Physics/AI: every RigBot falls with gravity like the player; ones with
+    // "Attacks Player" enabled also walk toward the player while grounded.
+    if (world.items && world.items.length > 0) {
+        const RIG_GRAVITY = -100;
         const RIG_SPEED = 3.2; // units/sec, deliberately slower than the player can walk
-        world.attackingRigs.forEach(rig => {
-            const toPlayer = new THREE.Vector3().subVectors(player.mesh.position, rig.position);
-            toPlayer.y = 0;
-            const dist = toPlayer.length();
-            if (dist > 1.2) {
-                toPlayer.normalize();
-                rig.position.addScaledVector(toPlayer, RIG_SPEED * dt);
-                rig.rotation.y = Math.atan2(toPlayer.x, toPlayer.z);
+        const rigRaycaster = new THREE.Raycaster();
+        const downVec = new THREE.Vector3(0, -1, 0);
+
+        world.items.forEach(rig => {
+            if (!rig.userData || !rig.userData.isRig) return;
+            if (rig.userData.velocityY === undefined) rig.userData.velocityY = 0;
+
+            // Chase the player (horizontal only) if this RigBot is set to attack.
+            if (rig.userData.attacksPlayer && !player.isDead) {
+                const toPlayer = new THREE.Vector3().subVectors(player.mesh.position, rig.position);
+                toPlayer.y = 0;
+                if (toPlayer.length() > 1.2) {
+                    toPlayer.normalize();
+                    rig.position.addScaledVector(toPlayer, RIG_SPEED * dt);
+                    rig.rotation.y = Math.atan2(toPlayer.x, toPlayer.z);
+                }
+            }
+
+            // Fall with gravity, same as the player, using a downward raycast against
+            // the world's collidables to find the ground.
+            rig.userData.velocityY += RIG_GRAVITY * dt;
+            rig.position.y += rig.userData.velocityY * dt;
+
+            rigRaycaster.set(new THREE.Vector3(rig.position.x, rig.position.y + 3, rig.position.z), downVec);
+            const hits = rigRaycaster.intersectObjects(world.collidables, true);
+            if (hits.length > 0 && hits[0].distance <= 3.3) {
+                rig.position.y = hits[0].point.y;
+                rig.userData.velocityY = 0;
             }
         });
     }
