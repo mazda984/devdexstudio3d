@@ -23,6 +23,9 @@ export class World {
         this.collidables = [];
         this.launchPads = [];
         this.teleporters = [];
+        // RigBots flagged to attack the player live here so Player.js can hit-test them
+        // the same way it already hit-tests killBricks.
+        this.attackingRigs = [];
         
         this.vehicles = [];
         this.animated = [];
@@ -79,6 +82,10 @@ export class World {
         });
         
         this.bgm = null;
+        // RigBots can't be reconstructed here (they need the player-mesh factory from
+        // main.js), so loadFromData() queues raw rig data here for main.js to spawn.
+        this.pendingRigs = [];
+        this.attackingRigs = [];
 
         // Clear Vehicles
         this.vehicles.forEach(v => {
@@ -143,7 +150,8 @@ export class World {
                     ry: obj.rotation.y,
                     rz: obj.rotation.z,
                     color: s.color, // integer
-                    flags: s.flags
+                    flags: s.flags,
+                    props: s.props // extra free-form data (e.g. RigBot behavior/appearance)
                 });
             }
         });
@@ -172,6 +180,10 @@ export class World {
                     const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    placedCount++;
+                } else if (d.type === 'rigbot') {
+                    // Can't build the player-model mesh here; hand it off to main.js after load.
+                    this.pendingRigs.push(d);
                     placedCount++;
                 }
             } catch (e) {

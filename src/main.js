@@ -1265,11 +1265,37 @@ const propInputs = {
     rx: document.getElementById('prop-rx'),
     ry: document.getElementById('prop-ry'),
     rz: document.getElementById('prop-rz'),
+    rigAttack: document.getElementById('prop-rig-attack'),
+    rigColor: document.getElementById('prop-rig-color'),
 };
 
 function updateStudioPropertiesUI() {
     if (!studioSelected) return;
     const m = studioSelected;
+
+    const rigSection = document.getElementById('prop-section-rig');
+    if (m.userData && m.userData.isRig) {
+        if (rigSection) rigSection.style.display = '';
+        if (propInputs.rigAttack) propInputs.rigAttack.checked = !!m.userData.attacksPlayer;
+        if (propInputs.rigColor) {
+            const hex = (m.userData.serial && m.userData.serial.props && m.userData.serial.props.color !== undefined)
+                ? m.userData.serial.props.color : 0xffffff;
+            propInputs.rigColor.value = '#' + hex.toString(16).padStart(6, '0');
+        }
+        // RigBot is a Group (no .material of its own) - only Transform fields apply below.
+        if (propInputs.px) propInputs.px.value = parseFloat(m.position.x.toFixed(2));
+        if (propInputs.py) propInputs.py.value = parseFloat(m.position.y.toFixed(2));
+        if (propInputs.pz) propInputs.pz.value = parseFloat(m.position.z.toFixed(2));
+        if (propInputs.sx) propInputs.sx.value = 1;
+        if (propInputs.sy) propInputs.sy.value = 1;
+        if (propInputs.sz) propInputs.sz.value = 1;
+        if (propInputs.rx) propInputs.rx.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.x));
+        if (propInputs.ry) propInputs.ry.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.y));
+        if (propInputs.rz) propInputs.rz.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.z));
+        return;
+    } else if (rigSection) {
+        rigSection.style.display = 'none';
+    }
     
     // SAFETY: ensure material exists before reading properties
     if (!m || !m.material) {
@@ -1354,6 +1380,14 @@ const onPropChange = () => {
         THREE.MathUtils.degToRad(parseFloat(propInputs.ry.value)),
         THREE.MathUtils.degToRad(parseFloat(propInputs.rz.value))
     );
+
+    if (m.userData && m.userData.isRig) {
+        // RigBots are a Group (no single .material/.geometry to resize), so only
+        // transform + their own Attack/Color properties apply.
+        if (propInputs.rigAttack) setRigAttacksPlayer(m, propInputs.rigAttack.checked);
+        if (propInputs.rigColor) applyRigAppearance(m, new THREE.Color(propInputs.rigColor.value).getHex());
+        return;
+    }
     
     // Size (Complex part: resizing geometry vs scaling)
     // We will update scale for simplicity, then bake if it's a block
@@ -2002,20 +2036,62 @@ document.getElementById('tool-delete').onclick = () => {
     }
 };
 
+// Recolors a RigBot's torso (its most visible part) to the given hex color, and keeps
+// the saved serial data in sync so the color survives save/publish/reload.
+function applyRigAppearance(rigMesh, hexColor) {
+    const torso = rigMesh.children[0];
+    if (torso && torso.material) {
+        const mats = Array.isArray(torso.material) ? torso.material : [torso.material];
+        mats.forEach(m => { if (m && m.color) m.color.setHex(hexColor); });
+    }
+    if (rigMesh.userData.serial) {
+        rigMesh.userData.serial.color = hexColor;
+        rigMesh.userData.serial.props.color = hexColor;
+    }
+}
+
+// Toggles whether a RigBot chases and attacks the player during PLAYING, keeping
+// world.attackingRigs (checked every frame in updatePlaying / Player.js) in sync.
+function setRigAttacksPlayer(rigMesh, shouldAttack) {
+    shouldAttack = !!shouldAttack;
+    rigMesh.userData.attacksPlayer = shouldAttack;
+    if (rigMesh.userData.serial) rigMesh.userData.serial.props.attacksPlayer = shouldAttack;
+    const idx = world.attackingRigs.indexOf(rigMesh);
+    if (shouldAttack && idx === -1) world.attackingRigs.push(rigMesh);
+    else if (!shouldAttack && idx !== -1) world.attackingRigs.splice(idx, 1);
+}
+
 // --- Rig Bot & Studio Day/Night: spawn rig, speak, toggle lighting ---
-async function spawnRig() {
+// savedData: optional { x,y,z, rx,ry,rz, props:{ attacksPlayer, color } } used to
+// reconstruct a RigBot that was previously saved (see World.loadFromData/pendingRigs).
+async function spawnRig(savedData = null) {
     playSwitch();
 
     // Create a default player-model rig using the same factory as players so it looks like a real player
-    const rid = 'rigbot-' + Date.now();
+    const savedProps = (savedData && savedData.props) || {};
+    const rid = savedProps.id || ('rigbot-' + Date.now());
     const materialsStore = {};
     const rigMesh = createPlayerMesh(materialsStore);
     rigMesh.name = 'RigBot';
-    rigMesh.userData = { isRig: true, id: rid };
+    const attacksPlayer = !!savedProps.attacksPlayer;
+    const bodyColor = (savedProps.color !== undefined) ? savedProps.color : 0xffffff;
+    rigMesh.userData = { isRig: true, id: rid, attacksPlayer: attacksPlayer };
+    // Generic serial record so World.serialize() picks this up automatically like any other object.
+    rigMesh.userData.serial = {
+        type: 'rigbot', w: 1, h: 1, d: 1, color: bodyColor, flags: [],
+        props: { id: rid, attacksPlayer: attacksPlayer, color: bodyColor }
+    };
+    applyRigAppearance(rigMesh, bodyColor);
 
-    // Position it a few units in front of the camera
-    const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -8).applyQuaternion(camera.quaternion));
-    rigMesh.position.copy(pos);
+    if (savedData) {
+        rigMesh.position.set(savedData.x || 0, savedData.y || 0, savedData.z || 0);
+        rigMesh.rotation.set(savedData.rx || 0, savedData.ry || 0, savedData.rz || 0);
+    } else {
+        // Position it a few units in front of the camera
+        const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -8).applyQuaternion(camera.quaternion));
+        rigMesh.position.copy(pos);
+    }
+    if (attacksPlayer && !world.attackingRigs.includes(rigMesh)) world.attackingRigs.push(rigMesh);
 
     // Add to the world explorer so it's selectable in studio, but do NOT animate or add AI movement.
     // Keep it out of collidables so it remains a static prop (prevents unexpected physics).
@@ -2143,6 +2219,8 @@ async function spawnRig() {
         // Ensure not in collidables
         const ci = world.collidables.indexOf(rigMesh);
         if (ci !== -1) world.collidables.splice(ci, 1);
+        const ai = world.attackingRigs.indexOf(rigMesh);
+        if (ai !== -1) world.attackingRigs.splice(ai, 1);
         if (rigMesh.parent) rigMesh.parent.remove(rigMesh);
         window.removeEventListener('mousedown', onMouseDown);
         updateExplorer();
@@ -2807,6 +2885,12 @@ function startGame(mapName, mapData = null, opts = {}) {
     } else {
         world.loadMap(mapName);
     }
+    // World.loadFromData() can't build RigBot meshes itself (needs createPlayerMesh from
+    // this file), so it queues raw rig data in world.pendingRigs for us to spawn here.
+    if (world.pendingRigs && world.pendingRigs.length > 0) {
+        const rigsToSpawn = world.pendingRigs.splice(0, world.pendingRigs.length);
+        rigsToSpawn.forEach(rigData => spawnRig(rigData));
+    }
 
     // Handle Custom Music
     if (gameBGM) {
@@ -3004,6 +3088,10 @@ function loadStudioWithMap(mapData, name = null, isRemix = false) {
 
     // Load Data
     world.loadFromData(mapData);
+    if (world.pendingRigs && world.pendingRigs.length > 0) {
+        const rigsToSpawn = world.pendingRigs.splice(0, world.pendingRigs.length);
+        rigsToSpawn.forEach(rigData => spawnRig(rigData));
+    }
     
     // Reset View
     if (world.mapGroup) world.mapGroup.visible = true;
@@ -4876,6 +4964,21 @@ function updatePlaying(dt) {
         map: currentMapName,
         isDead: player.isDead
     });
+
+    // RigBot AI: any RigBot with "Attacks Player" enabled slowly walks toward the player.
+    if (world.attackingRigs && world.attackingRigs.length > 0 && !player.isDead) {
+        const RIG_SPEED = 3.2; // units/sec, deliberately slower than the player can walk
+        world.attackingRigs.forEach(rig => {
+            const toPlayer = new THREE.Vector3().subVectors(player.mesh.position, rig.position);
+            toPlayer.y = 0;
+            const dist = toPlayer.length();
+            if (dist > 1.2) {
+                toPlayer.normalize();
+                rig.position.addScaledVector(toPlayer, RIG_SPEED * dt);
+                rig.rotation.y = Math.atan2(toPlayer.x, toPlayer.z);
+            }
+        });
+    }
 
     // 1. Update Camera Rotation
     const look = input.getLookDelta();

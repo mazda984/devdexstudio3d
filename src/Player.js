@@ -1408,6 +1408,21 @@ export class Player {
             }
         }
 
+        // RigBot Attack Check: any RigBot flagged to attack the player knocks them down on contact.
+        const attackingRigs = world && world.attackingRigs ? world.attackingRigs : [];
+        if (attackingRigs.length > 0) {
+            const pBox = new THREE.Box3().setFromObject(this.mesh);
+            pBox.expandByScalar(-0.4);
+
+            for (const rig of attackingRigs) {
+                const rBox = new THREE.Box3().setFromObject(rig);
+                if (pBox.intersectsBox(rBox)) {
+                    this.fallApart();
+                    return;
+                }
+            }
+        }
+
         // Launch Pad Check
         const launchPads = world && world.launchPads ? world.launchPads : [];
         if (launchPads.length > 0) {
