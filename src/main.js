@@ -50,7 +50,15 @@ async function getOrCreateShareBucket() {
     try { bucket = localStorage.getItem('nblox_share_bucket'); } catch (e) {}
     if (bucket) return bucket;
 
-    const res = await fetch(`${KVDB_BASE}/`, { method: 'POST' });
+    // kvdb.io requires an "email" field in the bucket-creation request (it doesn't need to be
+    // real/verified, but the request is rejected without it). This was previously missing,
+    // which meant bucket creation ALWAYS silently failed and Publish ALWAYS fell back to the
+    // local-only link - real cross-browser sharing never actually worked until this fix.
+    const res = await fetch(`${KVDB_BASE}/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'email=' + encodeURIComponent('devdex-anon-' + Date.now() + '@example.com')
+    });
     if (!res.ok) throw new Error('Could not create share bucket (status ' + res.status + ')');
     bucket = (await res.text()).trim();
     try { localStorage.setItem('nblox_share_bucket', bucket); } catch (e) {}
@@ -64,6 +72,13 @@ async function shareMapRemotely(mapName, saveObj) {
     // Base64-encode before upload so nothing in the JSON (quotes, unicode, newlines)
     // can get mangled/escaped/truncated by the third-party storage layer in transit.
     const encoded = btoa(unescape(encodeURIComponent(payload)));
+
+    // kvdb.io caps stored values at 16KB. Fail with a clear reason instead of a confusing
+    // HTTP error if a map is too big/detailed to share remotely this way.
+    if (encoded.length > 16000) {
+        throw new Error(`Map is too large to share remotely (${Math.round(encoded.length/1024)}KB, limit ~16KB). Try a simpler map with fewer objects.`);
+    }
+
     const res = await fetch(`${KVDB_BASE}/${bucket}/${key}`, { method: 'PUT', body: encoded });
     if (!res.ok) throw new Error('Could not upload map for sharing (status ' + res.status + ')');
     return { bucket, key };
@@ -2789,9 +2804,8 @@ function startGame(mapName, mapData = null, opts = {}) {
     gameState = 'PLAYING';
     player.forcedAnim = null; // Reset forced animation from menu
     
-    // Add join message
+    // Note: chat is always hidden now (see above), so we don't add a join message here.
     const username = document.getElementById('input-username').value || "Guest";
-    if (!minimalHud) addChatMessage("System", `${username} has joined the game.`);
 
     if (mapData) {
         world.loadFromData(mapData);
