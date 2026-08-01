@@ -1462,7 +1462,9 @@ document.getElementById('tool-publish').onclick = async () => {
             }
 
             let playUrl;
-            const MAX_URL_DATA_LENGTH = 6000; // keep the URL a reasonable length
+            // Modern browsers/servers comfortably handle URLs well beyond 100KB, so only fall
+            // back to the local-only link for genuinely huge maps (e.g. embedded music tracks).
+            const MAX_URL_DATA_LENGTH = 100000;
             if (encodedData && encodedData.length <= MAX_URL_DATA_LENGTH) {
                 // Self-contained shareable link: the map itself lives in the URL, so this
                 // works for ANYONE who opens it, with no server/service dependency at all.
