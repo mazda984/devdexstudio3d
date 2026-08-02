@@ -29,6 +29,13 @@ export class World {
         // Same idea as pendingRigs but for imported 3D models (GLB/GLTF) - main.js
         // owns the GLTFLoader, so World just queues the raw saved data on load.
         this.pendingModels = [];
+        // Objects with Anchored=false live here so main.js's physics loop can apply
+        // gravity/falling to them every frame, same as RigBots.
+        this.dynamicObjects = [];
+        // { mesh, parentRigId } pairs for parts that were welded (Anchored=true + attached)
+        // to a RigBot on save - the rig mesh doesn't exist yet at this point in loading,
+        // so main.js reparents these once RigBots have been spawned.
+        this.pendingWelds = [];
         
         this.vehicles = [];
         this.animated = [];
@@ -90,6 +97,8 @@ export class World {
         this.pendingRigs = [];
         this.attackingRigs = [];
         this.pendingModels = [];
+        this.dynamicObjects = [];
+        this.pendingWelds = [];
 
         // Clear Vehicles
         this.vehicles.forEach(v => {
@@ -155,7 +164,16 @@ export class World {
                     rz: obj.rotation.z,
                     color: s.color, // integer
                     flags: s.flags,
-                    props: s.props // extra free-form data (e.g. RigBot behavior/appearance)
+                    props: s.props, // extra free-form data (e.g. RigBot behavior/appearance)
+                    // Anchored defaults to true (matches the old, always-static behavior) so
+                    // existing saved maps keep working exactly as before.
+                    anchored: obj.userData.anchored !== false,
+                    // If this part is welded onto a RigBot (Object3D parent, not mapGroup),
+                    // remember which rig so it can be re-attached on load. x/y/z/rx/ry/rz
+                    // above are already in the rig's local space in that case, which is
+                    // exactly what re-parenting on load needs.
+                    parentRigId: (obj.parent && obj.parent.userData && obj.parent.userData.isRig)
+                        ? obj.parent.userData.id : null
                 });
             }
         });
@@ -170,6 +188,18 @@ export class World {
             return;
         }
 
+        // Sets up Anchored=false objects for gravity, and queues Anchored=true objects
+        // that were welded to a RigBot for main.js to re-attach once rigs exist.
+        this._applyAnchorState = (mesh, d) => {
+            mesh.userData.anchored = d.anchored !== false;
+            if (!mesh.userData.anchored) {
+                mesh.userData.velocityY = 0;
+                this.dynamicObjects.push(mesh);
+            } else if (d.parentRigId) {
+                this.pendingWelds.push({ mesh, parentRigId: d.parentRigId });
+            }
+        };
+
         let placedCount = 0;
         data.forEach(d => {
             try {
@@ -179,11 +209,13 @@ export class World {
                     const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    this._applyAnchorState(mesh, d);
                     placedCount++;
                 } else if (d.type === 'sphere' || d.type === 'cylinder' || d.type === 'wedge') {
                     const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    this._applyAnchorState(mesh, d);
                     placedCount++;
                 } else if (d.type === 'rigbot') {
                     // Can't build the player-model mesh here; hand it off to main.js after load.

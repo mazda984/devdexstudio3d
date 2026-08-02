@@ -1267,6 +1267,7 @@ const propInputs = {
     rz: document.getElementById('prop-rz'),
     rigAttack: document.getElementById('prop-rig-attack'),
     rigColor: document.getElementById('prop-rig-color'),
+    attachRig: document.getElementById('prop-attach-rig'),
 };
 
 function updateStudioPropertiesUI() {
@@ -1297,6 +1298,20 @@ function updateStudioPropertiesUI() {
         if (propInputs.rx) propInputs.rx.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.x));
         if (propInputs.ry) propInputs.ry.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.y));
         if (propInputs.rz) propInputs.rz.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.z));
+        if (m.userData.isRig) return; // rigs themselves can't be anchored/welded to another rig
+
+        // Imported 3D models CAN be anchored and welded to a RigBot, same as normal parts.
+        if (propInputs.anchored) propInputs.anchored.checked = m.userData?.anchored !== false;
+        if (propInputs.attachRig) {
+            const rigs = getAllRigs();
+            const attachRow = propInputs.attachRig.closest('.prop-row');
+            if (attachRow) attachRow.style.display = rigs.length > 0 ? '' : 'none';
+            if (rigs.length > 0) {
+                propInputs.attachRig.innerHTML = '<option value="">(None)</option>' +
+                    rigs.map(r => `<option value="${r.userData.id}">${r.name || 'RigBot'} (${r.userData.id.slice(-4)})</option>`).join('');
+                propInputs.attachRig.value = (m.parent && m.parent.userData && m.parent.userData.isRig) ? m.parent.userData.id : '';
+            }
+        }
         return;
     } else if (rigSection) {
         rigSection.style.display = 'none';
@@ -1364,7 +1379,21 @@ function updateStudioPropertiesUI() {
     if (propInputs.rz) propInputs.rz.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.z));
     
     // Behavior
-    if (propInputs.anchored) propInputs.anchored.checked = !!m.userData?.anchored;
+    if (propInputs.anchored) propInputs.anchored.checked = m.userData?.anchored !== false;
+    if (propInputs.attachRig) {
+        const rigs = getAllRigs();
+        const attachRow = propInputs.attachRig.closest('.prop-row');
+        // Welding only makes sense for normal parts, not the rigs themselves, and requires
+        // at least one RigBot to exist in the map.
+        const applicable = !(m.userData && (m.userData.isRig)) && rigs.length > 0;
+        if (attachRow) attachRow.style.display = applicable ? '' : 'none';
+        if (applicable) {
+            propInputs.attachRig.innerHTML = '<option value="">(None)</option>' +
+                rigs.map(r => `<option value="${r.userData.id}">${r.name || 'RigBot'} (${r.userData.id.slice(-4)})</option>`).join('');
+            const currentParentId = (m.parent && m.parent.userData && m.parent.userData.isRig) ? m.parent.userData.id : '';
+            propInputs.attachRig.value = currentParentId;
+        }
+    }
 }
 
 // Bind Property Inputs
@@ -1401,6 +1430,23 @@ const onPropChange = () => {
             parseFloat(propInputs.sy.value) || 1,
             parseFloat(propInputs.sz.value) || 1
         );
+        // Same Anchored/Weld-to-RigBot behavior as normal parts.
+        if (propInputs.anchored) setPartAnchored(m, propInputs.anchored.checked);
+        if (propInputs.attachRig) {
+            const targetId = propInputs.attachRig.value;
+            if (targetId) {
+                const rig = getAllRigs().find(r => r.userData.id === targetId);
+                if (rig) {
+                    if (!propInputs.anchored.checked) {
+                        propInputs.anchored.checked = true;
+                        setPartAnchored(m, true);
+                    }
+                    weldPartToRig(m, rig);
+                }
+            } else {
+                unweldPart(m);
+            }
+        }
         return;
     }
     
@@ -1431,6 +1477,30 @@ const onPropChange = () => {
     if (Array.isArray(m.material)) m.material.forEach(mat => mat.color = col);
     else m.material.color = col;
     if (m.userData.serial) m.userData.serial.color = col.getHex();
+
+    // Anchored: this actually drives physics now (see world.dynamicObjects handling in
+    // updatePlaying) - turning it off also detaches the part from any RigBot it's welded to.
+    if (propInputs.anchored) setPartAnchored(m, propInputs.anchored.checked);
+    if (propInputs.collide) m.userData.collide = propInputs.collide.checked;
+
+    // Weld to RigBot
+    if (propInputs.attachRig) {
+        const targetId = propInputs.attachRig.value;
+        if (targetId) {
+            const rig = getAllRigs().find(r => r.userData.id === targetId);
+            if (rig) {
+                // Welding only makes sense while Anchored (a moving/falling part can't
+                // rigidly track a rig), so enabling a weld also re-anchors the part.
+                if (!propInputs.anchored.checked) {
+                    propInputs.anchored.checked = true;
+                    setPartAnchored(m, true);
+                }
+                weldPartToRig(m, rig);
+            }
+        } else {
+            unweldPart(m);
+        }
+    }
 };
 
 // Tool Switching Logic
@@ -2032,6 +2102,21 @@ function spawnModel3D(savedData = null, arrayBuffer = null, fileName = 'model.gl
         }
 
         world.addToWorld(modelRoot, ['static']);
+
+        if (savedData) {
+            modelRoot.userData.anchored = savedData.anchored !== false;
+            if (!modelRoot.userData.anchored) {
+                modelRoot.userData.velocityY = 0;
+                world.dynamicObjects.push(modelRoot);
+            } else if (savedData.parentRigId) {
+                // RigBots are spawned before models in the load order, so the target
+                // rig should already exist - reparent directly (transform is already
+                // in the rig's local space, same as saved).
+                const rig = getAllRigs().find(r => r.userData.id === savedData.parentRigId);
+                if (rig) rig.add(modelRoot);
+            }
+        }
+
         studioSelected = modelRoot;
         updateStudioSelection();
         updateExplorer();
@@ -2054,6 +2139,57 @@ document.getElementById('model-file-input').addEventListener('change', (e) => {
     reader.readAsArrayBuffer(file);
     e.target.value = ''; // allow re-selecting the same file later
 });
+
+// Returns every RigBot currently in the world, for populating the "Weld To RigBot" dropdown.
+function getAllRigs() {
+    return world.items.filter(o => o.userData && o.userData.isRig);
+}
+
+// Rigidly attaches `part` to `rig` (becomes a real Three.js child), converting its
+// current world-space transform into the rig's local space first so it doesn't jump.
+// From then on it moves and rotates exactly with the rig, every frame, for free -
+// this only works while the part stays Anchored (see setPartAnchored below).
+function weldPartToRig(part, rig) {
+    const worldPos = new THREE.Vector3();
+    const worldQuat = new THREE.Quaternion();
+    part.getWorldPosition(worldPos);
+    part.getWorldQuaternion(worldQuat);
+
+    rig.add(part); // reparent (Three.js keeps part.position as-is, so we set it explicitly next)
+    rig.worldToLocal(worldPos);
+    part.position.copy(worldPos);
+    const rigWorldQuat = new THREE.Quaternion();
+    rig.getWorldQuaternion(rigWorldQuat);
+    part.quaternion.copy(rigWorldQuat.invert().multiply(worldQuat));
+}
+
+// Detaches `part` from whatever rig it's welded to, preserving its current world transform.
+function unweldPart(part) {
+    if (!part.parent || !part.parent.userData || !part.parent.userData.isRig) return;
+    const worldPos = new THREE.Vector3();
+    const worldQuat = new THREE.Quaternion();
+    part.getWorldPosition(worldPos);
+    part.getWorldQuaternion(worldQuat);
+    world.mapGroup.add(part);
+    part.position.copy(worldPos);
+    part.quaternion.copy(worldQuat);
+}
+
+// Turns Anchored on/off for a normal part, keeping world.dynamicObjects (gravity) and
+// any RigBot weld in sync: turning Anchored off always drops/detaches the part so it
+// falls freely, matching how Anchored=false behaves everywhere else in the game.
+function setPartAnchored(part, anchored) {
+    part.userData.anchored = !!anchored;
+    const idx = world.dynamicObjects.indexOf(part);
+    if (!anchored) {
+        unweldPart(part);
+        part.userData.velocityY = 0;
+        if (idx === -1) world.dynamicObjects.push(part);
+    } else if (idx !== -1) {
+        world.dynamicObjects.splice(idx, 1);
+    }
+}
+
 
 
 document.getElementById('tool-part').onclick = () => {
@@ -2346,6 +2482,12 @@ async function spawnRig(savedData = null) {
 
     // Cleanup helper so UI can remove rig cleanly
     rigMesh.userData.dispose = () => {
+        // Detach anything welded to this rig first so it doesn't get destroyed along with it.
+        [...rigMesh.children].forEach(child => {
+            if (child.userData && (child.userData.isModel3D || (child.userData.serial && child.userData.serial.type !== 'rigbot'))) {
+                unweldPart(child);
+            }
+        });
         // Remove from world.items
         const mi = world.items.indexOf(rigMesh);
         if (mi !== -1) world.items.splice(mi, 1);
@@ -3029,6 +3171,15 @@ function startGame(mapName, mapData = null, opts = {}) {
         const modelsToSpawn = world.pendingModels.splice(0, world.pendingModels.length);
         modelsToSpawn.forEach(modelData => spawnModel3D(modelData));
     }
+    if (world.pendingWelds && world.pendingWelds.length > 0) {
+        const weldsToApply = world.pendingWelds.splice(0, world.pendingWelds.length);
+        weldsToApply.forEach(({ mesh, parentRigId }) => {
+            const rig = getAllRigs().find(r => r.userData.id === parentRigId);
+            // The saved x/y/z/rotation are already the rig-local transform, so this is
+            // a plain reparent (no world<->local conversion needed like weldPartToRig does).
+            if (rig) rig.add(mesh);
+        });
+    }
 
     // Handle Custom Music
     if (gameBGM) {
@@ -3233,6 +3384,13 @@ function loadStudioWithMap(mapData, name = null, isRemix = false) {
     if (world.pendingModels && world.pendingModels.length > 0) {
         const modelsToSpawn = world.pendingModels.splice(0, world.pendingModels.length);
         modelsToSpawn.forEach(modelData => spawnModel3D(modelData));
+    }
+    if (world.pendingWelds && world.pendingWelds.length > 0) {
+        const weldsToApply = world.pendingWelds.splice(0, world.pendingWelds.length);
+        weldsToApply.forEach(({ mesh, parentRigId }) => {
+            const rig = getAllRigs().find(r => r.userData.id === parentRigId);
+            if (rig) rig.add(mesh);
+        });
     }
     
     // Reset View
@@ -5107,6 +5265,28 @@ function updatePlaying(dt) {
         map: currentMapName,
         isDead: player.isDead
     });
+
+    // Unanchored Parts Physics: any part with Anchored=false falls with gravity, exactly
+    // like the player/RigBots (also used for parts that fell/detached off a RigBot weld).
+    if (world.dynamicObjects && world.dynamicObjects.length > 0) {
+        const PART_GRAVITY = -100;
+        const partRaycaster = new THREE.Raycaster();
+        const downVec2 = new THREE.Vector3(0, -1, 0);
+        world.dynamicObjects.forEach(part => {
+            if (part.userData.velocityY === undefined) part.userData.velocityY = 0;
+            part.userData.velocityY += PART_GRAVITY * dt;
+            part.position.y += part.userData.velocityY * dt;
+
+            const bbox = new THREE.Box3().setFromObject(part);
+            const halfHeight = Math.max(0.05, (bbox.max.y - bbox.min.y) / 2);
+            partRaycaster.set(new THREE.Vector3(part.position.x, part.position.y + halfHeight + 2, part.position.z), downVec2);
+            const hits = partRaycaster.intersectObjects(world.collidables.filter(c => c !== part), true);
+            if (hits.length > 0 && hits[0].distance <= halfHeight + 2.3) {
+                part.position.y = hits[0].point.y + halfHeight;
+                part.userData.velocityY = 0;
+            }
+        });
+    }
 
     // RigBot Physics/AI: every RigBot falls with gravity like the player; ones with
     // "Attacks Player" enabled also walk toward the player while grounded.
