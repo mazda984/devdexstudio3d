@@ -1274,21 +1274,26 @@ function updateStudioPropertiesUI() {
     const m = studioSelected;
 
     const rigSection = document.getElementById('prop-section-rig');
-    if (m.userData && m.userData.isRig) {
-        if (rigSection) rigSection.style.display = '';
-        if (propInputs.rigAttack) propInputs.rigAttack.checked = !!m.userData.attacksPlayer;
-        if (propInputs.rigColor) {
-            const hex = (m.userData.serial && m.userData.serial.props && m.userData.serial.props.color !== undefined)
-                ? m.userData.serial.props.color : 0xffffff;
-            propInputs.rigColor.value = '#' + hex.toString(16).padStart(6, '0');
+    if (m.userData && (m.userData.isRig || m.userData.isModel3D)) {
+        if (m.userData.isRig) {
+            if (rigSection) rigSection.style.display = '';
+            if (propInputs.rigAttack) propInputs.rigAttack.checked = !!m.userData.attacksPlayer;
+            if (propInputs.rigColor) {
+                const hex = (m.userData.serial && m.userData.serial.props && m.userData.serial.props.color !== undefined)
+                    ? m.userData.serial.props.color : 0xffffff;
+                propInputs.rigColor.value = '#' + hex.toString(16).padStart(6, '0');
+            }
+        } else if (rigSection) {
+            rigSection.style.display = 'none';
         }
-        // RigBot is a Group (no .material of its own) - only Transform fields apply below.
+        // RigBots and imported 3D models are Groups (no .material of their own) -
+        // only Transform fields apply below.
         if (propInputs.px) propInputs.px.value = parseFloat(m.position.x.toFixed(2));
         if (propInputs.py) propInputs.py.value = parseFloat(m.position.y.toFixed(2));
         if (propInputs.pz) propInputs.pz.value = parseFloat(m.position.z.toFixed(2));
-        if (propInputs.sx) propInputs.sx.value = 1;
-        if (propInputs.sy) propInputs.sy.value = 1;
-        if (propInputs.sz) propInputs.sz.value = 1;
+        if (propInputs.sx) propInputs.sx.value = parseFloat((m.scale?.x ?? 1).toFixed(2));
+        if (propInputs.sy) propInputs.sy.value = parseFloat((m.scale?.y ?? 1).toFixed(2));
+        if (propInputs.sz) propInputs.sz.value = parseFloat((m.scale?.z ?? 1).toFixed(2));
         if (propInputs.rx) propInputs.rx.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.x));
         if (propInputs.ry) propInputs.ry.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.y));
         if (propInputs.rz) propInputs.rz.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.z));
@@ -1386,6 +1391,16 @@ const onPropChange = () => {
         // transform + their own Attack/Color properties apply.
         if (propInputs.rigAttack) setRigAttacksPlayer(m, propInputs.rigAttack.checked);
         if (propInputs.rigColor) applyRigAppearance(m, new THREE.Color(propInputs.rigColor.value).getHex());
+        return;
+    }
+    if (m.userData && m.userData.isModel3D) {
+        // Imported 3D models are a Group; use the Size fields as a plain scale multiplier.
+        // (obj.scale.x/y/z is already captured generically by World.serialize().)
+        m.scale.set(
+            parseFloat(propInputs.sx.value) || 1,
+            parseFloat(propInputs.sy.value) || 1,
+            parseFloat(propInputs.sz.value) || 1
+        );
         return;
     }
     
@@ -1910,8 +1925,31 @@ document.getElementById('tool-toolbox')?.addEventListener('click', () => {
 document.getElementById('tool-duplicate').onclick = () => {
     if (studioSelected) {
         playSwitch();
-        // Clone
         const original = studioSelected;
+
+        // RigBots and imported 3D models are Groups with no top-level .geometry/.material,
+        // so they need their own simple clone path instead of the block/part path below.
+        if (original.userData && (original.userData.isRig || original.userData.isModel3D)) {
+            const clone = original.clone(true);
+            clone.userData = JSON.parse(JSON.stringify(original.userData));
+            clone.position.add(new THREE.Vector3(2, 0, 2));
+            clone.name = original.name;
+            if (original.userData.isRig) {
+                clone.userData.spawnPos = clone.position.clone();
+                clone.userData.spawnRot = clone.rotation.clone();
+                if (clone.userData.serial && clone.userData.serial.props) {
+                    clone.userData.serial.props.id = 'rigbot-' + Date.now();
+                }
+            }
+            world.addToWorld(clone, ['static']);
+            if (original.userData.isRig && clone.userData.attacksPlayer) world.attackingRigs.push(clone);
+            studioSelected = clone;
+            updateStudioSelection();
+            updateExplorer();
+            return;
+        }
+
+        // Clone
         const clone = original.clone();
         
         // Fix geometry (clone shares geometry by default)
@@ -1939,6 +1977,84 @@ document.getElementById('tool-duplicate').onclick = () => {
         updateExplorer(); // Refresh list
     }
 };
+
+// --- 3D Model Import (GLB/GLTF) ---
+function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000; // avoid call-stack limits on String.fromCharCode for big files
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+}
+function base64ToArrayBuffer(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
+// Imports a .glb/.gltf model into the world. Either pass `arrayBuffer` + `fileName` for a
+// brand-new import (from the file picker), or `savedData` to rebuild one that was saved
+// previously (see World.loadFromData/pendingModels) - its GLB bytes are stored as base64
+// in userData.serial.props.data so it round-trips through save/publish/reload like anything else.
+function spawnModel3D(savedData = null, arrayBuffer = null, fileName = 'model.glb') {
+    const props = (savedData && savedData.props) || {};
+    const base64Data = props.data || (arrayBuffer ? arrayBufferToBase64(arrayBuffer) : null);
+    const modelName = props.name || fileName;
+    if (!base64Data) return;
+    const bufferToLoad = arrayBuffer || base64ToArrayBuffer(base64Data);
+
+    const loader = new GLTFLoader();
+    loader.parse(bufferToLoad, '', (gltf) => {
+        const modelRoot = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+        if (!modelRoot) {
+            addChatMessage('System', `Failed to import "${modelName}": no scene found in file.`);
+            return;
+        }
+        modelRoot.name = modelName;
+        modelRoot.userData = {
+            isModel3D: true,
+            serial: {
+                type: 'model3d', w: 1, h: 1, d: 1, color: 0, flags: ['static'],
+                props: { data: base64Data, name: modelName }
+            }
+        };
+
+        if (savedData) {
+            modelRoot.position.set(savedData.x || 0, savedData.y || 0, savedData.z || 0);
+            modelRoot.rotation.set(savedData.rx || 0, savedData.ry || 0, savedData.rz || 0);
+            modelRoot.scale.set(savedData.sx || 1, savedData.sy || 1, savedData.sz || 1);
+        } else {
+            const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -8).applyQuaternion(camera.quaternion));
+            modelRoot.position.copy(pos);
+        }
+
+        world.addToWorld(modelRoot, ['static']);
+        studioSelected = modelRoot;
+        updateStudioSelection();
+        updateExplorer();
+    }, (err) => {
+        console.error('Failed to parse imported 3D model:', err);
+        addChatMessage('System', `Failed to import "${modelName}": file may be corrupted or not a valid .glb/.gltf.`);
+    });
+}
+
+document.getElementById('tool-model').onclick = () => {
+    playSwitch();
+    document.getElementById('model-file-input').click();
+};
+document.getElementById('model-file-input').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => spawnModel3D(null, reader.result, file.name);
+    reader.onerror = () => addChatMessage('System', `Couldn't read "${file.name}".`);
+    reader.readAsArrayBuffer(file);
+    e.target.value = ''; // allow re-selecting the same file later
+});
+
 
 document.getElementById('tool-part').onclick = () => {
     // Spawn block in front of camera
@@ -2909,6 +3025,10 @@ function startGame(mapName, mapData = null, opts = {}) {
         const rigsToSpawn = world.pendingRigs.splice(0, world.pendingRigs.length);
         rigsToSpawn.forEach(rigData => spawnRig(rigData));
     }
+    if (world.pendingModels && world.pendingModels.length > 0) {
+        const modelsToSpawn = world.pendingModels.splice(0, world.pendingModels.length);
+        modelsToSpawn.forEach(modelData => spawnModel3D(modelData));
+    }
 
     // Handle Custom Music
     if (gameBGM) {
@@ -3109,6 +3229,10 @@ function loadStudioWithMap(mapData, name = null, isRemix = false) {
     if (world.pendingRigs && world.pendingRigs.length > 0) {
         const rigsToSpawn = world.pendingRigs.splice(0, world.pendingRigs.length);
         rigsToSpawn.forEach(rigData => spawnRig(rigData));
+    }
+    if (world.pendingModels && world.pendingModels.length > 0) {
+        const modelsToSpawn = world.pendingModels.splice(0, world.pendingModels.length);
+        modelsToSpawn.forEach(modelData => spawnModel3D(modelData));
     }
     
     // Reset View

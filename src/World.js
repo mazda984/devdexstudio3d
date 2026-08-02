@@ -26,6 +26,9 @@ export class World {
         // RigBots flagged to attack the player live here so Player.js can hit-test them
         // the same way it already hit-tests killBricks.
         this.attackingRigs = [];
+        // Same idea as pendingRigs but for imported 3D models (GLB/GLTF) - main.js
+        // owns the GLTFLoader, so World just queues the raw saved data on load.
+        this.pendingModels = [];
         
         this.vehicles = [];
         this.animated = [];
@@ -86,6 +89,7 @@ export class World {
         // main.js), so loadFromData() queues raw rig data here for main.js to spawn.
         this.pendingRigs = [];
         this.attackingRigs = [];
+        this.pendingModels = [];
 
         // Clear Vehicles
         this.vehicles.forEach(v => {
@@ -184,6 +188,11 @@ export class World {
                 } else if (d.type === 'rigbot') {
                     // Can't build the player-model mesh here; hand it off to main.js after load.
                     this.pendingRigs.push(d);
+                    placedCount++;
+                } else if (d.type === 'model3d') {
+                    // Can't parse GLB binary data here (needs GLTFLoader in main.js);
+                    // hand it off to main.js after load, same pattern as pendingRigs.
+                    this.pendingModels.push(d);
                     placedCount++;
                 }
             } catch (e) {
