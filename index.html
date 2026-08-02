@@ -628,6 +628,9 @@
             }
         }
     </script>
+    <!-- PeerJS: WebRTC signaling via PeerJS's free public broker (0.peerjs.com), so real
+         peer-to-peer online multiplayer works without us needing to run our own server. -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script>
         // Bu proje aslinda Websim ortaminda calisacak sekilde yazilmis ve
         // "WebsimSocket" adinda gercek zamanli (multiplayer) bir sunucu
@@ -638,19 +641,158 @@
         // basit bir yerel (tek oyunculu) yedek/polyfill'dir; boylece oyun
         // cokmeden calisir, sadece coklu oyuncu/chat ozellikleri pasif olur.
         if (typeof window.WebsimSocket === 'undefined') {
+            // Real online multiplayer via WebRTC, using PeerJS's free public broker only to
+            // exchange connection info (signaling) - once connected, game data flows directly
+            // peer-to-peer. No custom backend needed, works from any static host (GitHub Pages,
+            // a zip you open locally via a server, etc.
+            //
+            // Topology: everyone playing the same map (matched by the '?play=' URL param, plus
+            // a bit of the map data/id so different people's maps with the same name don't
+            // collide) tries to become peer id "nblox-<roomId>". Whoever gets there first is the
+            // "host" and relays messages/presence between everyone else (star topology) - simple
+            // and reliable for a handful of players. Everyone else connects to that host peer.
             window.WebsimSocket = class WebsimSocket {
                 constructor() {
-                    this.clientId = 'local-' + Math.random().toString(36).slice(2, 10);
+                    this.clientId = null;
                     this.presence = {};
                     this.peers = {};
                     this.roomState = {};
                     this.onmessage = null;
                     this._presenceHandlers = [];
+                    this._conns = new Map(); // peerId -> PeerJS DataConnection
+                    this.isHost = false;
+                    this._hostConn = null;
                 }
+
+                _roomId() {
+                    try {
+                        const params = new URLSearchParams(location.search);
+                        const play = params.get('play') || 'lobby';
+                        const extra = (params.get('id') || params.get('data') || '').slice(0, 12);
+                        const raw = (play + '-' + extra).toLowerCase().replace(/[^a-z0-9-]/g, '');
+                        return 'nblox-' + (raw || 'lobby');
+                    } catch (e) {
+                        return 'nblox-lobby';
+                    }
+                }
+
+                _goSolo() {
+                    // No network / PeerJS unavailable / broker unreachable - keep the game
+                    // fully playable offline, just without other players.
+                    this.clientId = this.clientId || ('local-' + Math.random().toString(36).slice(2, 10));
+                    this.presence[this.clientId] = this.presence[this.clientId] || { username: 'Guest' };
+                }
+
                 async initialize() {
-                    this.presence[this.clientId] = { username: 'Guest' };
-                    return Promise.resolve();
+                    if (typeof Peer === 'undefined') {
+                        console.warn('[WebRTC] PeerJS did not load (offline / blocked); playing solo.');
+                        this._goSolo();
+                        return;
+                    }
+                    const hostId = this._roomId();
+                    await new Promise((resolve) => {
+                        let settled = false;
+                        const finish = () => { if (!settled) { settled = true; resolve(); } };
+                        // Absolute safety net: never let a broker hang stall the game from starting.
+                        const giveUpTimer = setTimeout(() => { this._goSolo(); finish(); }, 8000);
+
+                        const joinAsClient = () => {
+                            let peer;
+                            try { peer = new Peer(undefined, { debug: 0 }); } catch (e) { clearTimeout(giveUpTimer); this._goSolo(); finish(); return; }
+                            peer.on('open', (id) => {
+                                this.peer = peer;
+                                this.clientId = id;
+                                this.isHost = false;
+                                this.presence[this.clientId] = { username: 'Guest' };
+                                const conn = peer.connect(hostId, { reliable: true });
+                                this._hostConn = conn;
+                                this._wireConn(conn, hostId);
+                                conn.on('open', () => { clearTimeout(giveUpTimer); finish(); });
+                                conn.on('error', () => { clearTimeout(giveUpTimer); this._goSolo(); finish(); });
+                            });
+                            peer.on('error', (err) => {
+                                console.warn('[WebRTC] Could not join room, playing solo:', err && err.type);
+                                clearTimeout(giveUpTimer);
+                                this._goSolo();
+                                finish();
+                            });
+                        };
+
+                        let peer;
+                        try { peer = new Peer(hostId, { debug: 0 }); } catch (e) { clearTimeout(giveUpTimer); this._goSolo(); finish(); return; }
+                        peer.on('open', (id) => {
+                            this.peer = peer;
+                            this.clientId = id;
+                            this.isHost = true;
+                            this.presence[this.clientId] = { username: 'Guest' };
+                            peer.on('connection', (conn) => this._registerClientConn(conn));
+                            clearTimeout(giveUpTimer);
+                            finish();
+                        });
+                        peer.on('error', (err) => {
+                            if (err && err.type === 'unavailable-id') {
+                                // Someone's already hosting this room - join them as a client instead.
+                                try { peer.destroy(); } catch (e) {}
+                                joinAsClient();
+                            } else {
+                                console.warn('[WebRTC] Could not host room, playing solo:', err && err.type);
+                                clearTimeout(giveUpTimer);
+                                this._goSolo();
+                                finish();
+                            }
+                        });
+                    });
                 }
+
+                _registerClientConn(conn) {
+                    conn.on('open', () => {
+                        this._conns.set(conn.peer, conn);
+                        // Bring the newcomer up to date with everyone already in the room.
+                        conn.send({ kind: 'presence-full', data: this.presence });
+                    });
+                    this._wireConn(conn, conn.peer);
+                    conn.on('close', () => {
+                        this._conns.delete(conn.peer);
+                        delete this.presence[conn.peer];
+                        this._relay({ kind: 'presence-leave', id: conn.peer }, null);
+                        this._firePresence();
+                    });
+                }
+
+                _wireConn(conn, peerId) {
+                    conn.on('data', (packet) => {
+                        if (!packet || !packet.kind) return;
+                        if (packet.kind === 'presence-full') {
+                            this.presence = packet.data || {};
+                            this._firePresence();
+                        } else if (packet.kind === 'presence-update') {
+                            this.presence[packet.id] = packet.data;
+                            this._firePresence();
+                            if (this.isHost) this._relay(packet, peerId);
+                        } else if (packet.kind === 'presence-leave') {
+                            delete this.presence[packet.id];
+                            this._firePresence();
+                            if (this.isHost) this._relay(packet, peerId);
+                        } else if (packet.kind === 'msg') {
+                            if (typeof this.onmessage === 'function') {
+                                try { this.onmessage({ data: packet.data, clientId: packet.id }); } catch (e) {}
+                            }
+                            if (this.isHost) this._relay(packet, peerId);
+                        }
+                    });
+                    conn.on('error', () => {});
+                }
+
+                _relay(packet, exceptPeerId) {
+                    this._conns.forEach((c, id) => {
+                        if (id !== exceptPeerId && c.open) { try { c.send(packet); } catch (e) {} }
+                    });
+                }
+
+                _firePresence() {
+                    this._presenceHandlers.forEach(h => { try { h(this.presence); } catch (e) {} });
+                }
+
                 subscribePresence(handler) {
                     this._presenceHandlers.push(handler);
                     try { handler(this.presence); } catch (e) {}
@@ -658,19 +800,23 @@
                         this._presenceHandlers = this._presenceHandlers.filter(h => h !== handler);
                     };
                 }
+
                 updatePresence(data) {
                     this.presence[this.clientId] = { ...(this.presence[this.clientId] || {}), ...data };
-                    this._presenceHandlers.forEach(h => {
-                        try { h(this.presence); } catch (e) {}
-                    });
+                    const packet = { kind: 'presence-update', id: this.clientId, data: this.presence[this.clientId] };
+                    if (this.isHost) this._relay(packet, null);
+                    else if (this._hostConn && this._hostConn.open) { try { this._hostConn.send(packet); } catch (e) {} }
+                    this._firePresence();
                 }
+
                 send(data) {
-                    if (typeof this.onmessage === 'function') {
-                        try {
-                            this.onmessage({ data: { ...data, clientId: this.clientId } });
-                        } catch (e) {}
-                    }
+                    const packet = { kind: 'msg', id: this.clientId, data };
+                    if (this.isHost) this._relay(packet, null);
+                    else if (this._hostConn && this._hostConn.open) { try { this._hostConn.send(packet); } catch (e) {} }
+                    // Note: we don't echo the message back to our own onmessage - the game
+                    // already shows the sender's own chat/actions locally when they send them.
                 }
+
                 subscribeRoomState(handler) {
                     try { handler(this.roomState); } catch (e) {}
                     return () => {};
@@ -679,7 +825,7 @@
                     this.roomState = { ...this.roomState, ...data };
                 }
             };
-            console.warn('[uyari] Gercek Websim sunucusuna baglanilamadi; yerel (tek oyunculu) WebsimSocket yedegi devrede. Coklu oyuncu ve gercek zamanli sohbet ozellikleri bu ortamda calismayacaktir.');
+            console.log('[WebRTC] Using peer-to-peer online multiplayer (no Websim server detected).');
         }
     </script>
 </head>
