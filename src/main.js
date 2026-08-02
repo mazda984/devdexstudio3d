@@ -873,7 +873,7 @@ let lastCamYawClick = 0;
 let gameState = 'MENU'; // MENU, CUSTOMIZE, PLAYING, SETTINGS, STUDIO, TEST
 let minimalHudActive = false; // true when playing via a shared link with no chat/leave-game UI shown
 
-const menuBGM = new Audio('./Asgore Runs Over Dess With Lyrics - Deltarune.mp3');
+const menuBGM = new Audio('./TheGreatStrategy.mp3');
 menuBGM.loop = true;
 menuBGM.volume = 0.6;
 
@@ -1302,6 +1302,7 @@ function updateStudioPropertiesUI() {
 
         // Imported 3D models CAN be anchored and welded to a RigBot, same as normal parts.
         if (propInputs.anchored) propInputs.anchored.checked = m.userData?.anchored !== false;
+        if (propInputs.collide) propInputs.collide.checked = m.userData?.collide !== false;
         if (propInputs.attachRig) {
             const rigs = getAllRigs();
             const attachRow = propInputs.attachRig.closest('.prop-row');
@@ -1380,6 +1381,7 @@ function updateStudioPropertiesUI() {
     
     // Behavior
     if (propInputs.anchored) propInputs.anchored.checked = m.userData?.anchored !== false;
+    if (propInputs.collide) propInputs.collide.checked = m.userData?.collide !== false;
     if (propInputs.attachRig) {
         const rigs = getAllRigs();
         const attachRow = propInputs.attachRig.closest('.prop-row');
@@ -1430,8 +1432,9 @@ const onPropChange = () => {
             parseFloat(propInputs.sy.value) || 1,
             parseFloat(propInputs.sz.value) || 1
         );
-        // Same Anchored/Weld-to-RigBot behavior as normal parts.
+        // Same Anchored/CanCollide/Weld-to-RigBot behavior as normal parts.
         if (propInputs.anchored) setPartAnchored(m, propInputs.anchored.checked);
+        if (propInputs.collide) setPartCollide(m, propInputs.collide.checked);
         if (propInputs.attachRig) {
             const targetId = propInputs.attachRig.value;
             if (targetId) {
@@ -1481,7 +1484,7 @@ const onPropChange = () => {
     // Anchored: this actually drives physics now (see world.dynamicObjects handling in
     // updatePlaying) - turning it off also detaches the part from any RigBot it's welded to.
     if (propInputs.anchored) setPartAnchored(m, propInputs.anchored.checked);
-    if (propInputs.collide) m.userData.collide = propInputs.collide.checked;
+    if (propInputs.collide) setPartCollide(m, propInputs.collide.checked);
 
     // Weld to RigBot
     if (propInputs.attachRig) {
@@ -2175,7 +2178,16 @@ function unweldPart(part) {
     part.quaternion.copy(worldQuat);
 }
 
-// Turns Anchored on/off for a normal part, keeping world.dynamicObjects (gravity) and
+// Turns CanCollide on/off for a part. This is what Player.js's collision loop actually
+// checks against (world.collidables), so toggling it truly lets the player walk through
+// the object (or not), instead of the checkbox previously being pure decoration.
+function setPartCollide(part, collide) {
+    part.userData.collide = !!collide;
+    const idx = world.collidables.indexOf(part);
+    if (collide && idx === -1) world.collidables.push(part);
+    else if (!collide && idx !== -1) world.collidables.splice(idx, 1);
+}
+
 // any RigBot weld in sync: turning Anchored off always drops/detaches the part so it
 // falls freely, matching how Anchored=false behaves everywhere else in the game.
 function setPartAnchored(part, anchored) {

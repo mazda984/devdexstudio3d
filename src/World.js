@@ -168,6 +168,7 @@ export class World {
                     // Anchored defaults to true (matches the old, always-static behavior) so
                     // existing saved maps keep working exactly as before.
                     anchored: obj.userData.anchored !== false,
+                    collide: obj.userData.collide !== false,
                     // If this part is welded onto a RigBot (Object3D parent, not mapGroup),
                     // remember which rig so it can be re-attached on load. x/y/z/rx/ry/rz
                     // above are already in the rig's local space in that case, which is
@@ -197,6 +198,13 @@ export class World {
                 this.dynamicObjects.push(mesh);
             } else if (d.parentRigId) {
                 this.pendingWelds.push({ mesh, parentRigId: d.parentRigId });
+            }
+            // CanCollide=false: addToWorld() already put it in this.collidables (since it
+            // was created with the 'static' flag), so take it back out.
+            if (d.collide === false && mesh.userData.collide) {
+                mesh.userData.collide = false;
+                const ci = this.collidables.indexOf(mesh);
+                if (ci !== -1) this.collidables.splice(ci, 1);
             }
         };
 
@@ -245,6 +253,10 @@ export class World {
         this.mapGroup.add(mesh);
         this.items.push(mesh);
         if (types.includes('static')) this.collidables.push(mesh);
+        // CanCollide defaults to true for anything solid, matching the properties panel's
+        // checkbox default (checked). Toggling it off later just removes it from
+        // this.collidables (see main.js's setPartCollide), so the player walks through it.
+        mesh.userData.collide = types.includes('static');
         if (types.includes('kill')) this.killBricks.push(mesh);
         if (types.includes('launch')) this.launchPads.push(mesh);
         if (types.includes('teleport')) this.teleporters.push(mesh);
