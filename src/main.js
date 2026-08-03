@@ -2273,7 +2273,7 @@ function updateWeaponSystem(dt) {
     if (!hasRocketLauncher) {
         let closest = null, closestDist = 3.5; // pickup radius
         world.items.forEach(o => {
-            if (o.userData && o.userData.isWeaponPickup) {
+            if (o.userData && o.userData.isWeaponPickup && !o.userData.collected) {
                 const d = o.position.distanceTo(player.mesh.position);
                 if (d < closestDist) { closest = o; closestDist = d; }
             }
@@ -2283,9 +2283,8 @@ function updateWeaponSystem(dt) {
 
         if (closest && input.keys.e && !weaponSystemState.eWasDown) {
             hasRocketLauncher = true;
-            const idx = world.items.indexOf(closest);
-            if (idx !== -1) world.items.splice(idx, 1);
-            if (closest.parent) closest.parent.remove(closest);
+            closest.visible = false;
+            closest.userData.collected = true;
             weaponHint.style.display = 'none';
             weaponEquippedLabel.style.display = 'block';
             addChatMessage('System', 'Equipped Rocket Launcher! Click to fire.');
@@ -2304,6 +2303,13 @@ function resetWeaponState() {
     nearbyWeaponPickup = null;
     weaponHint.style.display = 'none';
     weaponEquippedLabel.style.display = 'none';
+    // Bring back any pickup that was collected this session, exactly where it was placed.
+    world.items.forEach(o => {
+        if (o.userData && o.userData.isWeaponPickup && o.userData.collected) {
+            o.userData.collected = false;
+            o.visible = true;
+        }
+    });
     activeRockets.forEach(r => {
         if (r.mesh.parent) r.mesh.parent.remove(r.mesh);
         r.mesh.geometry.dispose();
