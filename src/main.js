@@ -1275,7 +1275,7 @@ function updateStudioPropertiesUI() {
     const m = studioSelected;
 
     const rigSection = document.getElementById('prop-section-rig');
-    if (m.userData && (m.userData.isRig || m.userData.isModel3D)) {
+    if (m.userData && (m.userData.isRig || m.userData.isModel3D || m.userData.isWeaponPickup)) {
         if (m.userData.isRig) {
             if (rigSection) rigSection.style.display = '';
             if (propInputs.rigAttack) propInputs.rigAttack.checked = !!m.userData.attacksPlayer;
@@ -1298,7 +1298,7 @@ function updateStudioPropertiesUI() {
         if (propInputs.rx) propInputs.rx.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.x));
         if (propInputs.ry) propInputs.ry.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.y));
         if (propInputs.rz) propInputs.rz.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.z));
-        if (m.userData.isRig) return; // rigs themselves can't be anchored/welded to another rig
+        if (m.userData.isRig || m.userData.isWeaponPickup) return; // no anchor/weld UI needed for these
 
         // Imported 3D models CAN be anchored and welded to a RigBot, same as normal parts.
         if (propInputs.anchored) propInputs.anchored.checked = m.userData?.anchored !== false;
@@ -1417,6 +1417,10 @@ const onPropChange = () => {
         THREE.MathUtils.degToRad(parseFloat(propInputs.rz.value))
     );
 
+    if (m.userData && m.userData.isWeaponPickup) {
+        // Just a plain Group - position/rotation (already applied above) is all that applies.
+        return;
+    }
     if (m.userData && m.userData.isRig) {
         // RigBots are a Group (no single .material/.geometry to resize), so only
         // transform + their own Attack/Color properties apply.
@@ -2002,7 +2006,7 @@ document.getElementById('tool-duplicate').onclick = () => {
 
         // RigBots and imported 3D models are Groups with no top-level .geometry/.material,
         // so they need their own simple clone path instead of the block/part path below.
-        if (original.userData && (original.userData.isRig || original.userData.isModel3D)) {
+        if (original.userData && (original.userData.isRig || original.userData.isModel3D || original.userData.isWeaponPickup)) {
             const clone = original.clone(true);
             clone.userData = JSON.parse(JSON.stringify(original.userData));
             clone.position.add(new THREE.Vector3(2, 0, 2));
@@ -2129,6 +2133,15 @@ function spawnModel3D(savedData = null, arrayBuffer = null, fileName = 'model.gl
     });
 }
 
+document.getElementById('tool-weapon').onclick = () => {
+    playSwitch();
+    const pos = camera.position.clone().add(new THREE.Vector3(0, -1, -5).applyQuaternion(camera.quaternion));
+    const pickup = world.createWeaponPickup(pos.x, pos.y, pos.z);
+    studioSelected = pickup;
+    updateStudioSelection();
+    updateExplorer();
+};
+
 document.getElementById('tool-model').onclick = () => {
     playSwitch();
     document.getElementById('model-file-input').click();
@@ -2142,6 +2155,175 @@ document.getElementById('model-file-input').addEventListener('change', (e) => {
     reader.readAsArrayBuffer(file);
     e.target.value = ''; // allow re-selecting the same file later
 });
+
+// --- Rocket Launcher weapon: pickup/equip, firing, and explosion knockback ---
+let hasRocketLauncher = false;
+let nearbyWeaponPickup = null;
+let lastRocketFireTime = 0;
+const ROCKET_FIRE_COOLDOWN = 800; // ms
+const activeRockets = []; // { mesh, velocity, spawnTime }
+
+// Small on-screen hint, created once and reused (kept out of index.html since it's purely
+// a runtime prompt, not part of the game's static layout).
+const weaponHint = document.createElement('div');
+weaponHint.style.cssText = 'position:fixed; bottom:120px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.7); color:#fff; padding:6px 14px; border-radius:4px; font-size:14px; font-family:sans-serif; display:none; z-index:900; pointer-events:none;';
+weaponHint.textContent = 'Press E to pick up Rocket Launcher';
+document.body.appendChild(weaponHint);
+
+const weaponEquippedLabel = document.createElement('div');
+weaponEquippedLabel.style.cssText = 'position:fixed; bottom:20px; right:20px; background:rgba(0,0,0,0.6); color:#ff6a3d; padding:6px 12px; border-radius:4px; font-size:13px; font-family:sans-serif; font-weight:bold; display:none; z-index:900; pointer-events:none;';
+weaponEquippedLabel.textContent = '🚀 Rocket Launcher (Click to fire)';
+document.body.appendChild(weaponEquippedLabel);
+
+// Explosion knockback: any Anchored=false part/model within `radius` of `center` gets
+// launched away, harder the closer it was to the blast. This is the whole point of the
+// Anchored system paying off - anchored blocks are unaffected and don't move, exactly
+// like blast physics in Roblox-style games.
+function explodeAt(center, radius = 14, force = 55) {
+    if (world.dynamicObjects) {
+        world.dynamicObjects.forEach(part => {
+            const objCenter = new THREE.Box3().setFromObject(part).getCenter(new THREE.Vector3());
+            const diff = new THREE.Vector3().subVectors(objCenter, center);
+            const dist = diff.length();
+            if (dist < radius) {
+                const strength = force * (1 - dist / radius) + 5;
+                diff.y = 0;
+                if (diff.lengthSq() < 0.0001) diff.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+                diff.normalize();
+                if (part.userData.velocityX === undefined) part.userData.velocityX = 0;
+                if (part.userData.velocityZ === undefined) part.userData.velocityZ = 0;
+                part.userData.velocityX += diff.x * strength;
+                part.userData.velocityZ += diff.z * strength;
+                part.userData.velocityY = Math.max(part.userData.velocityY || 0, strength * 0.9);
+            }
+        });
+    }
+    spawnExplosionVFX(center);
+}
+
+// Cheap explosion flash: an expanding, fading sphere removed shortly after.
+function spawnExplosionVFX(center) {
+    const flash = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 12, 12),
+        new THREE.MeshBasicMaterial({ color: 0xffaa33, transparent: true, opacity: 0.9 })
+    );
+    flash.position.copy(center);
+    scene.add(flash);
+    const start = performance.now();
+    const anim = () => {
+        const t = (performance.now() - start) / 350; // 350ms lifetime
+        if (t >= 1) { scene.remove(flash); flash.geometry.dispose(); flash.material.dispose(); return; }
+        flash.scale.setScalar(1 + t * 10);
+        flash.material.opacity = 0.9 * (1 - t);
+        requestAnimationFrame(anim);
+    };
+    anim();
+    try { playSwitch(); } catch (e) {}
+}
+
+function fireRocket() {
+    const now = performance.now();
+    if (now - lastRocketFireTime < ROCKET_FIRE_COOLDOWN) return;
+    lastRocketFireTime = now;
+
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    const start = camera.position.clone().addScaledVector(dir, 1.2);
+
+    const mesh = new THREE.Mesh(
+        new THREE.ConeGeometry(0.15, 0.6, 8),
+        new THREE.MeshBasicMaterial({ color: 0xff3300 })
+    );
+    mesh.position.copy(start);
+    mesh.lookAt(start.clone().add(dir));
+    mesh.rotateX(Math.PI / 2);
+    scene.add(mesh);
+
+    activeRockets.push({ mesh, velocity: dir.clone().multiplyScalar(55), spawnTime: now });
+    playSwitch();
+}
+
+// Called every frame from updatePlaying(): moves rockets, checks for a hit, explodes them.
+function updateRockets(dt) {
+    if (activeRockets.length === 0) return;
+    const raycaster = new THREE.Raycaster();
+    for (let i = activeRockets.length - 1; i >= 0; i--) {
+        const r = activeRockets[i];
+        const moveDist = r.velocity.length() * dt;
+        raycaster.set(r.mesh.position, r.velocity.clone().normalize());
+        const hits = raycaster.intersectObjects(world.collidables, true);
+
+        const timedOut = performance.now() - r.spawnTime > 4000; // 4s max lifetime
+        if ((hits.length > 0 && hits[0].distance <= moveDist) || timedOut) {
+            const hitPoint = (hits.length > 0) ? hits[0].point : r.mesh.position.clone();
+            explodeAt(hitPoint, 14, 55);
+            scene.remove(r.mesh);
+            r.mesh.geometry.dispose();
+            r.mesh.material.dispose();
+            activeRockets.splice(i, 1);
+            continue;
+        }
+        r.mesh.position.addScaledVector(r.velocity, dt);
+    }
+}
+
+// Called every frame from updatePlaying(): pickup proximity check ('E' to equip) + firing input.
+function updateWeaponSystem(dt) {
+    // Proximity check for un-equipped pickups
+    if (!hasRocketLauncher) {
+        let closest = null, closestDist = 3.5; // pickup radius
+        world.items.forEach(o => {
+            if (o.userData && o.userData.isWeaponPickup) {
+                const d = o.position.distanceTo(player.mesh.position);
+                if (d < closestDist) { closest = o; closestDist = d; }
+            }
+        });
+        nearbyWeaponPickup = closest;
+        weaponHint.style.display = closest ? 'block' : 'none';
+
+        if (closest && input.keys.e && !weaponSystemState.eWasDown) {
+            hasRocketLauncher = true;
+            const idx = world.items.indexOf(closest);
+            if (idx !== -1) world.items.splice(idx, 1);
+            if (closest.parent) closest.parent.remove(closest);
+            weaponHint.style.display = 'none';
+            weaponEquippedLabel.style.display = 'block';
+            addChatMessage('System', 'Equipped Rocket Launcher! Click to fire.');
+        }
+    }
+    weaponSystemState.eWasDown = !!input.keys.e;
+
+    updateRockets(dt);
+}
+const weaponSystemState = { eWasDown: false };
+
+// Clears all weapon state - called whenever a PLAYING/TEST session starts or stops, so
+// nothing lingers (equipped weapon, in-flight rockets, HUD hints) between sessions.
+function resetWeaponState() {
+    hasRocketLauncher = false;
+    nearbyWeaponPickup = null;
+    weaponHint.style.display = 'none';
+    weaponEquippedLabel.style.display = 'none';
+    activeRockets.forEach(r => {
+        if (r.mesh.parent) r.mesh.parent.remove(r.mesh);
+        r.mesh.geometry.dispose();
+        r.mesh.material.dispose();
+    });
+    activeRockets.length = 0;
+}
+
+
+// Firing input: left-click while equipped (only once pointer is locked, so this doesn't
+// hijack the very first click that requests pointer lock).
+window.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
+    if (!document.pointerLockElement) return;
+    if (!hasRocketLauncher) return;
+    fireRocket();
+});
+
+
 
 // Returns every RigBot currently in the world, for populating the "Weld To RigBot" dropdown.
 function getAllRigs() {
@@ -2739,6 +2921,7 @@ btnStopTest.onclick = () => {
     btnStopTest.style.display = 'none';
     studioGui.style.display = 'flex';
     resetAllRigsToSpawn();
+    resetWeaponState();
     // Restore selection?
     if (studioSelected) transformControl.attach(studioSelected);
 };
@@ -3726,6 +3909,7 @@ btnExit.onclick = () => {
     minimalHudActive = false;
     if (world.mapGroup) world.mapGroup.visible = false;
     resetAllRigsToSpawn();
+    resetWeaponState();
 
     // Clean the address bar back to the base URL, so leaving actually leaves:
     // reloading the page (or copying the URL) won't jump straight back into
@@ -5252,6 +5436,7 @@ function updateMenu(dt) {
 function updatePlaying(dt) {
     if (world.mapGroup) world.mapGroup.visible = true;
     menuGroup.visible = false;
+    updateWeaponSystem(dt);
     
     // POINTS: award 1 point every 10 seconds played
     playSecondsAcc += dt;
@@ -5279,15 +5464,25 @@ function updatePlaying(dt) {
     });
 
     // Unanchored Parts Physics: any part with Anchored=false falls with gravity, exactly
-    // like the player/RigBots (also used for parts that fell/detached off a RigBot weld).
+    // like the player/RigBots (also used for parts that fell/detached off a RigBot weld,
+    // or got launched by a rocket explosion - see explodeAt()).
     if (world.dynamicObjects && world.dynamicObjects.length > 0) {
         const PART_GRAVITY = -100;
+        const HORIZONTAL_DAMPING = 0.92; // per-frame-ish decay so blown-around blocks settle down
         const partRaycaster = new THREE.Raycaster();
         const downVec2 = new THREE.Vector3(0, -1, 0);
         world.dynamicObjects.forEach(part => {
             if (part.userData.velocityY === undefined) part.userData.velocityY = 0;
+            if (part.userData.velocityX === undefined) part.userData.velocityX = 0;
+            if (part.userData.velocityZ === undefined) part.userData.velocityZ = 0;
+
             part.userData.velocityY += PART_GRAVITY * dt;
             part.position.y += part.userData.velocityY * dt;
+            part.position.x += part.userData.velocityX * dt;
+            part.position.z += part.userData.velocityZ * dt;
+            const dampFactor = Math.pow(HORIZONTAL_DAMPING, dt * 60);
+            part.userData.velocityX *= dampFactor;
+            part.userData.velocityZ *= dampFactor;
 
             const bbox = new THREE.Box3().setFromObject(part);
             const halfHeight = Math.max(0.05, (bbox.max.y - bbox.min.y) / 2);

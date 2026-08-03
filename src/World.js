@@ -234,6 +234,9 @@ export class World {
                     // hand it off to main.js after load, same pattern as pendingRigs.
                     this.pendingModels.push(d);
                     placedCount++;
+                } else if (d.type === 'weapon_rocketlauncher') {
+                    this.createWeaponPickup(d.x, d.y, d.z);
+                    placedCount++;
                 }
             } catch (e) {
                 console.warn('Skipped a corrupted world object during load:', e, d);
@@ -247,6 +250,41 @@ export class World {
             console.warn('World data contained no placeable objects - loading a default platform instead.');
             this.setupPlatform();
         }
+    }
+
+    // Builds a simple rocket-launcher pickup: a small stand-alone gun model the player can
+    // walk up to and press E to equip in-game. No external assets needed (plain primitives),
+    // so - unlike RigBots/3D models - it can be fully reconstructed right here on load.
+    createWeaponPickup(x, y, z) {
+        const group = new THREE.Group();
+        const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
+        const tubeMat = new THREE.MeshLambertMaterial({ color: 0x585858 });
+
+        const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.6, 10), tubeMat);
+        tube.rotation.z = Math.PI / 2;
+        group.add(tube);
+
+        const grip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), bodyMat);
+        grip.position.set(-0.45, -0.35, 0);
+        group.add(grip);
+
+        const sight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), bodyMat);
+        sight.position.set(0.35, 0.26, 0);
+        group.add(sight);
+
+        group.position.set(x || 0, y || 0, z || 0);
+        group.name = 'RocketLauncher';
+        group.userData = {
+            isWeaponPickup: true,
+            weaponType: 'rocketlauncher',
+            serial: { type: 'weapon_rocketlauncher', w: 1, h: 1, d: 1, color: 0x2b2b2b, flags: [], props: {} }
+        };
+
+        // Not passed through addToWorld()'s 'static' flag on purpose - a pickup shouldn't
+        // block player movement, just sit there until collected.
+        this.mapGroup.add(group);
+        this.items.push(group);
+        return group;
     }
 
     addToWorld(mesh, types = ['static']) {
