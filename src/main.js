@@ -1635,16 +1635,30 @@ document.getElementById('tool-publish').onclick = async () => {
             // Modern browsers/servers comfortably handle URLs well beyond 100KB, so only fall
             // back to the local-only link for genuinely huge maps (e.g. embedded music tracks).
             const MAX_URL_DATA_LENGTH = 100000;
+
+            // Carry the Devdex-equipped-avatar params (if this session was opened
+            // from Devdex with an equipped catalog item) into the published link,
+            // so the item still shows up for anyone who opens it later.
+            const publishDevdexExtra = new URLSearchParams();
+            try {
+                const curParams = new URLSearchParams(window.location.search);
+                ['devdexItemImage', 'devdexItemType', 'devdexUsername'].forEach((key) => {
+                    const val = curParams.get(key);
+                    if (val) publishDevdexExtra.set(key, val);
+                });
+            } catch (e) {}
+            const publishDevdexSuffix = publishDevdexExtra.toString() ? `&${publishDevdexExtra.toString()}` : '';
+
             if (encodedData && encodedData.length <= MAX_URL_DATA_LENGTH) {
                 // Self-contained shareable link: the map itself lives in the URL, so this
                 // works for ANYONE who opens it, with no server/service dependency at all.
-                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${encodedData}`;
+                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${encodedData}${publishDevdexSuffix}`;
             } else {
                 if (encodedData) {
                     console.warn(`Map is too large to embed in a URL (${Math.round(encodedData.length/1024)}KB, limit ~${Math.round(MAX_URL_DATA_LENGTH/1024)}KB) - falling back to a local-only link.`);
                 }
                 // Local-only fallback link (only opens correctly in this same browser).
-                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${id}`;
+                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${id}${publishDevdexSuffix}`;
             }
 
             try {
@@ -3354,19 +3368,30 @@ function startGame(mapName, mapData = null, opts = {}) {
         const existingRid = existingParams.get('rid');
         const existingId = existingParams.get('id');
 
+        // Preserve the Devdex-equipped-avatar params too, otherwise the very
+        // URL that gets shown/copied/shared as the "play link" silently
+        // drops them and the equipped catalog item stops showing up for
+        // anyone (including the owner) who opens that link.
+        const devdexExtra = new URLSearchParams();
+        ['devdexItemImage', 'devdexItemType', 'devdexUsername'].forEach((key) => {
+            const val = existingParams.get(key);
+            if (val) devdexExtra.set(key, val);
+        });
+        const devdexSuffix = devdexExtra.toString() ? `&${devdexExtra.toString()}` : '';
+
         let playUrl;
         if (existingData) {
             // Self-contained link - keep it exactly as-is.
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${existingData}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${existingData}${devdexSuffix}`;
         } else if (existingBucket && existingRid) {
             // Already a real shareable link - keep it exactly as-is.
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${existingBucket}&rid=${existingRid}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${existingBucket}&rid=${existingRid}${devdexSuffix}`;
         } else if (existingId) {
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${existingId}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${existingId}${devdexSuffix}`;
         } else {
             // No share info in the current URL (e.g. played from the in-menu Play list) -
             // just tag it with a fresh run id, purely cosmetic for the address bar.
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${Date.now()}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${Date.now()}${devdexSuffix}`;
         }
 
         try { localStorage.setItem('nblox_map_url_' + mapName, playUrl); } catch(e){}

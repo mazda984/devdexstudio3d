@@ -648,11 +648,18 @@ export class Player {
             const size = hatData.size || 1.1;
             const plane = new THREE.Mesh(
                 new THREE.PlaneGeometry(size, size),
-                new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, color: 0xffffff }),
+                new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, color: 0xffffff, depthWrite: false }),
             );
-            plane.position.y = 0.55;
+            // Sit clearly above the head (not overlapping it) so it can't
+            // z-fight/clip into the head geometry from any camera angle.
+            plane.position.y = 0.95;
             hatGroup.add(plane);
             hatGroup.scale.set(0.6, 0.6, 0.6);
+            // Always face the camera (billboard) - see Player.update(). Kept
+            // as a flat plane welded to head rotation it would show its edge
+            // or back from many angles, which looked like a broken/doubled
+            // copy of the item.
+            this._hatBillboardPlane = plane;
             loader.load(
                 hatData.imageUrl,
                 (tex) => {
@@ -777,6 +784,7 @@ export class Player {
             });
             this._hat = null;
         }
+        this._hatBillboardPlane = null;
         this.appearance.hat = null;
     }
 
@@ -1609,6 +1617,21 @@ export class Player {
         }
         
         this.updateGlitches(dt);
+
+        // Keep the Devdex catalog-item hat (a flat image plane) always facing
+        // the camera. Without this it stays welded to the head's rotation, so
+        // as the camera orbits around you can end up looking at its back/edge
+        // or see it clipped into the head geometry - which from some angles
+        // reads as if you're looking at a warped, doubled copy of yourself.
+        if (camera && this._hatBillboardPlane) {
+            const parent = this._hatBillboardPlane.parent;
+            if (parent) {
+                parent.updateWorldMatrix(true, false);
+                const parentWorldQuat = new THREE.Quaternion();
+                parent.getWorldQuaternion(parentWorldQuat);
+                this._hatBillboardPlane.quaternion.copy(parentWorldQuat.clone().invert().multiply(camera.quaternion.clone()));
+            }
+        }
     }
 
     checkCollision(x, y, z, collidables) {
