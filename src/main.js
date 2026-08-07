@@ -639,10 +639,24 @@ try {
 try {
     const devdexParams = new URLSearchParams(window.location.search);
     const devdexItemImage = devdexParams.get('devdexItemImage');
+    const devdexItemType = devdexParams.get('devdexItemType'); // "hat" | "shirt"
     const devdexUsername = devdexParams.get('devdexUsername');
 
     if (devdexItemImage) {
-        player.createHat({ type: 'image', imageUrl: decodeURIComponent(devdexItemImage), size: 1.1 });
+        const imageUrl = decodeURIComponent(devdexItemImage);
+        if (devdexItemType === 'shirt') {
+            // Wear the catalog item as a shirt: load it as a real Image first
+            // (setShirtTexture only accepts an HTMLImageElement/Canvas or a
+            // data: URL, not a remote URL string) then apply it to the torso.
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => player.setShirtTexture(img, imageUrl);
+            img.onerror = () => console.warn('Failed to load Devdex-equipped shirt image', imageUrl);
+            img.src = imageUrl;
+        } else {
+            // Default: show it as a hat (floating billboard above the head).
+            player.createHat({ type: 'image', imageUrl, size: 1.1 });
+        }
     }
     if (devdexUsername && typeof player.setUsername === 'function') {
         player.setUsername(decodeURIComponent(devdexUsername));
