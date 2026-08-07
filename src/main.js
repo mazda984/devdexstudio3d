@@ -631,6 +631,27 @@ try {
     console.error("Failed to load character", e);
 }
 
+// Devdex integration: if this page was embedded by the main Devdex site with
+// a currently-equipped catalog item, show that item as a hat — this runs
+// AFTER the locally saved appearance above so it always reflects whatever
+// is equipped on Devdex right now, without touching the player's saved
+// local customization.
+try {
+    const devdexParams = new URLSearchParams(window.location.search);
+    const devdexItemImage = devdexParams.get('devdexItemImage');
+    const devdexUsername = devdexParams.get('devdexUsername');
+
+    if (devdexItemImage) {
+        player.createHat({ type: 'image', imageUrl: decodeURIComponent(devdexItemImage), size: 1.1 });
+    }
+    if (devdexUsername && typeof player.setUsername === 'function') {
+        player.setUsername(decodeURIComponent(devdexUsername));
+    }
+} catch (e) {
+    console.warn('Failed to apply Devdex-equipped item', e);
+}
+
+
 // Name Change Limit Logic
 let nameChangesLeft = 3;
 try {

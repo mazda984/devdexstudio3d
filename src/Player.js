@@ -641,7 +641,29 @@ export class Player {
         const hatGroup = new THREE.Group();
         hatGroup.name = 'hat';
 
-        if (hatData.constructed && hatData.parts && hatData.parts.length > 0) {
+        if (hatData.type === 'image' && hatData.imageUrl) {
+            // Devdex catalog item: render the item's image as a floating
+            // billboard plane above the head, rather than a 3D primitive.
+            const loader = new THREE.TextureLoader();
+            const size = hatData.size || 1.1;
+            const plane = new THREE.Mesh(
+                new THREE.PlaneGeometry(size, size),
+                new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, color: 0xffffff }),
+            );
+            plane.position.y = 0.55;
+            hatGroup.add(plane);
+            hatGroup.scale.set(0.6, 0.6, 0.6);
+            loader.load(
+                hatData.imageUrl,
+                (tex) => {
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    plane.material.map = tex;
+                    plane.material.needsUpdate = true;
+                },
+                undefined,
+                (err) => console.warn('Failed to load Devdex catalog item image for hat:', err),
+            );
+        } else if (hatData.constructed && hatData.parts && hatData.parts.length > 0) {
             // Load custom composed hat
             hatData.parts.forEach((p) => {
                 let geo;
