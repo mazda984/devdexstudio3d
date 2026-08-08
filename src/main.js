@@ -264,6 +264,46 @@ menuGroup.position.set(3.5, 1.5, 8);
 const player = new Player(scene);
 const remotePlayers = {}; // Changed to Object for ID mapping
 
+// --- Host-authoritative sync for unanchored (Anchored=false) parts, e.g. a football -------
+// Physics for these parts (gravity, player-push) used to be simulated 100% locally on each
+// client with zero network traffic, so every player saw a different position for the same
+// ball. Fix: exactly one client per map ("the physics host") runs the simulation and
+// broadcasts the results; everyone else just smoothly interpolates toward whatever the host
+// last reported, instead of simulating their own diverging copy.
+//
+// Host election has to produce the SAME answer on every client without any extra handshake,
+// so it's just "whoever has the lowest clientId among everyone currently on this map" -
+// deterministic, self-healing when someone leaves (everyone recomputes it every call), and
+// needs no coordination messages of its own.
+function isPhysicsHost() {
+    if (!room || !room.clientId) return true; // no networking available yet - simulate locally
+    let lowest = room.clientId;
+    for (const id in remotePlayers) {
+        if (id < lowest) lowest = id;
+    }
+    return lowest === room.clientId;
+}
+
+// Throttling + interpolation state for the dynamic-object sync messages (kept outside the
+// function below so it survives across frames without polluting World/part userData).
+const dynSync = {
+    lastSendTime: 0,
+    sendInterval: 0.05 // ~20Hz - plenty smooth for a rolling/bouncing ball, cheap on bandwidth
+};
+
+// Non-host clients call this when a 'dyn_sync' message arrives: stash the host's reported
+// state on each part so the interpolation step in updatePlaying() can ease toward it instead
+// of snapping (snapping looks like teleporting/stuttering over the network).
+function applyDynSync(objects) {
+    if (!world || !world.dynamicObjects || !Array.isArray(objects)) return;
+    objects.forEach((o, i) => {
+        const part = world.dynamicObjects[i];
+        if (!part) return;
+        part.userData.netTarget = { x: o.x, y: o.y, z: o.z };
+        part.userData.netVelocity = { x: o.vx, y: o.vy, z: o.vz };
+    });
+}
+
 // Load pet GLB and attach a cloned pet to the player's head when ready
 (function loadAndAttachPet() {
     const loader = new GLTFLoader();
@@ -435,6 +475,15 @@ room.subscribePresence((presence) => {
 
 room.onmessage = (evt) => {
     const data = evt.data;
+    if (data.type === 'dyn_sync') {
+        // Ignore our own broadcast bouncing back, and ignore stray messages if we're somehow
+        // also the host (e.g. a brief moment during host handover) so hosts never fight over
+        // authority.
+        if (evt.clientId !== room.clientId && !isPhysicsHost()) {
+            applyDynSync(data.objects);
+        }
+        return;
+    }
     if (data.type === 'chat') {
         const id = evt.clientId;
         const msg = data.message || '';
@@ -5559,62 +5608,125 @@ function updatePlaying(dt) {
 
     // Unanchored Parts Physics: any part with Anchored=false falls with gravity, exactly
     // like the player/RigBots (also used for parts that fell/detached off a RigBot weld,
-    // or got launched by a rocket explosion - see explodeAt()). Also lets the player shove
+    // or got launched by a rocket explosion - see explodeAt()). Also lets players shove
     // these parts around by walking into them (e.g. a football/soccer ball).
+    //
+    // NETWORK SYNC: this used to run identically-but-independently on every client with no
+    // messages exchanged, so each player's ball drifted apart from everyone else's almost
+    // instantly (floating point + frame-timing differences compound fast). Now only the
+    // "physics host" for this map (see isPhysicsHost() above) actually simulates it and
+    // broadcasts the result; every other client just eases its local copy toward the last
+    // broadcast state, so everyone looks at the same ball.
     if (world.dynamicObjects && world.dynamicObjects.length > 0) {
-        const PART_GRAVITY = -100;
-        const HORIZONTAL_DAMPING = 0.92; // per-frame-ish decay so blown-around blocks settle down
-        const MAX_PUSH_SPEED = 14; // cap so standing against a part doesn't fling it away instantly
-        const partRaycaster = new THREE.Raycaster();
-        const downVec2 = new THREE.Vector3(0, -1, 0);
-        const playerBoxForPush = new THREE.Box3().setFromObject(player.mesh);
-        world.dynamicObjects.forEach(part => {
-            if (part.userData.velocityY === undefined) part.userData.velocityY = 0;
-            if (part.userData.velocityX === undefined) part.userData.velocityX = 0;
-            if (part.userData.velocityZ === undefined) part.userData.velocityZ = 0;
+        if (isPhysicsHost()) {
+            const PART_GRAVITY = -100;
+            const HORIZONTAL_DAMPING = 0.92; // per-frame-ish decay so blown-around blocks settle down
+            const MAX_PUSH_SPEED = 14; // cap so standing against a part doesn't fling it away instantly
+            const partRaycaster = new THREE.Raycaster();
+            const downVec2 = new THREE.Vector3(0, -1, 0);
 
-            // Push: player walking into an unanchored part shoves it in the direction
-            // they're pushing from, like kicking a ball.
-            const partBoxPre = new THREE.Box3().setFromObject(part);
-            if (!player.isDead && playerBoxForPush.intersectsBox(partBoxPre)) {
-                const dx = part.position.x - player.position.x;
-                const dz = part.position.z - player.position.z;
-                const dist = Math.hypot(dx, dz);
-                if (dist > 0.0001) {
-                    const nx = dx / dist, nz = dz / dist;
-                    const PUSH_ACCEL = 26;
-                    part.userData.velocityX += nx * PUSH_ACCEL * dt;
-                    part.userData.velocityZ += nz * PUSH_ACCEL * dt;
-                    // Nudge apart immediately so the player doesn't stay overlapping it and
-                    // keep re-triggering the push every single frame at full force.
-                    part.position.x += nx * 0.08;
-                    part.position.z += nz * 0.08;
+            // Push boxes for every player the host can see - local AND remote - so a remote
+            // player can also kick/shove the ball, not just the host's own player.
+            const pushers = [{ mesh: player.mesh, isDead: player.isDead }];
+            for (const id in remotePlayers) {
+                const rp = remotePlayers[id];
+                if (rp && rp.mesh && rp.mesh.visible) pushers.push({ mesh: rp.mesh, isDead: false });
+            }
+            const pusherBoxes = pushers
+                .filter(p => !p.isDead)
+                .map(p => ({ box: new THREE.Box3().setFromObject(p.mesh), pos: p.mesh.position }));
+
+            world.dynamicObjects.forEach(part => {
+                if (part.userData.velocityY === undefined) part.userData.velocityY = 0;
+                if (part.userData.velocityX === undefined) part.userData.velocityX = 0;
+                if (part.userData.velocityZ === undefined) part.userData.velocityZ = 0;
+
+                // Push: any player (host or remote) walking into an unanchored part shoves it
+                // in the direction they're pushing from, like kicking a ball.
+                const partBoxPre = new THREE.Box3().setFromObject(part);
+                for (const pusher of pusherBoxes) {
+                    if (!pusher.box.intersectsBox(partBoxPre)) continue;
+                    const dx = part.position.x - pusher.pos.x;
+                    const dz = part.position.z - pusher.pos.z;
+                    const dist = Math.hypot(dx, dz);
+                    if (dist > 0.0001) {
+                        const nx = dx / dist, nz = dz / dist;
+                        const PUSH_ACCEL = 26;
+                        part.userData.velocityX += nx * PUSH_ACCEL * dt;
+                        part.userData.velocityZ += nz * PUSH_ACCEL * dt;
+                        // Nudge apart immediately so the pusher doesn't stay overlapping it and
+                        // keep re-triggering the push every single frame at full force.
+                        part.position.x += nx * 0.08;
+                        part.position.z += nz * 0.08;
+                    }
+                }
+
+                const speed = Math.hypot(part.userData.velocityX, part.userData.velocityZ);
+                if (speed > MAX_PUSH_SPEED) {
+                    const scale = MAX_PUSH_SPEED / speed;
+                    part.userData.velocityX *= scale;
+                    part.userData.velocityZ *= scale;
+                }
+
+                part.userData.velocityY += PART_GRAVITY * dt;
+                part.position.y += part.userData.velocityY * dt;
+                part.position.x += part.userData.velocityX * dt;
+                part.position.z += part.userData.velocityZ * dt;
+                const dampFactor = Math.pow(HORIZONTAL_DAMPING, dt * 60);
+                part.userData.velocityX *= dampFactor;
+                part.userData.velocityZ *= dampFactor;
+
+                const bbox = new THREE.Box3().setFromObject(part);
+                const halfHeight = Math.max(0.05, (bbox.max.y - bbox.min.y) / 2);
+                partRaycaster.set(new THREE.Vector3(part.position.x, part.position.y + halfHeight + 2, part.position.z), downVec2);
+                const hits = partRaycaster.intersectObjects(world.collidables.filter(c => c !== part), true);
+                if (hits.length > 0 && hits[0].distance <= halfHeight + 2.3) {
+                    part.position.y = hits[0].point.y + halfHeight;
+                    part.userData.velocityY = 0;
+                }
+            });
+
+            // Broadcast the authoritative state to everyone else on this map, throttled so we
+            // don't spam the socket every single frame.
+            dynSync.lastSendTime += dt;
+            if (dynSync.lastSendTime >= dynSync.sendInterval) {
+                dynSync.lastSendTime = 0;
+                try {
+                    room.send({
+                        type: 'dyn_sync',
+                        objects: world.dynamicObjects.map(part => ({
+                            x: part.position.x, y: part.position.y, z: part.position.z,
+                            vx: part.userData.velocityX || 0,
+                            vy: part.userData.velocityY || 0,
+                            vz: part.userData.velocityZ || 0
+                        }))
+                    });
+                } catch (e) {
+                    // Non-fatal - worst case remote players see a slightly stale ball until
+                    // the next successful broadcast.
                 }
             }
-            const speed = Math.hypot(part.userData.velocityX, part.userData.velocityZ);
-            if (speed > MAX_PUSH_SPEED) {
-                const scale = MAX_PUSH_SPEED / speed;
-                part.userData.velocityX *= scale;
-                part.userData.velocityZ *= scale;
-            }
+        } else {
+            // Not the host: don't simulate at all (that's exactly what caused the divergence),
+            // just glide toward wherever the host last said this part was. Falls back to
+            // continuing along the last known velocity (dead-reckoning) if no update has
+            // arrived yet this frame, so motion still looks smooth between the ~20Hz packets.
+            world.dynamicObjects.forEach(part => {
+                const target = part.userData.netTarget;
+                if (!target) return; // haven't heard from the host yet
+                const vel = part.userData.netVelocity || { x: 0, y: 0, z: 0 };
+                // Dead-reckon the target forward so the ease-to point keeps moving between
+                // packets instead of the ball pausing every ~50ms.
+                target.x += vel.x * dt;
+                target.y += vel.y * dt;
+                target.z += vel.z * dt;
 
-            part.userData.velocityY += PART_GRAVITY * dt;
-            part.position.y += part.userData.velocityY * dt;
-            part.position.x += part.userData.velocityX * dt;
-            part.position.z += part.userData.velocityZ * dt;
-            const dampFactor = Math.pow(HORIZONTAL_DAMPING, dt * 60);
-            part.userData.velocityX *= dampFactor;
-            part.userData.velocityZ *= dampFactor;
-
-            const bbox = new THREE.Box3().setFromObject(part);
-            const halfHeight = Math.max(0.05, (bbox.max.y - bbox.min.y) / 2);
-            partRaycaster.set(new THREE.Vector3(part.position.x, part.position.y + halfHeight + 2, part.position.z), downVec2);
-            const hits = partRaycaster.intersectObjects(world.collidables.filter(c => c !== part), true);
-            if (hits.length > 0 && hits[0].distance <= halfHeight + 2.3) {
-                part.position.y = hits[0].point.y + halfHeight;
-                part.userData.velocityY = 0;
-            }
-        });
+                const LERP = Math.min(1, dt * 12);
+                part.position.x += (target.x - part.position.x) * LERP;
+                part.position.y += (target.y - part.position.y) * LERP;
+                part.position.z += (target.z - part.position.z) * LERP;
+            });
+        }
     }
 
     // Block-touch/tick scripts: OnTickUpdate:command? rules run on their own fixed timer
