@@ -9,8 +9,31 @@
     // removed: const heavyAnimatedDefinitions = {}
 */
 import * as THREE from 'three';
-import { boxUnwrapUVs, surfaceManager } from './utils.js';
+import { boxUnwrapUVs, surfaceManager, materialTextures } from './utils.js';
 import { Vehicle } from './Vehicle.js';
+
+// Builds the material(s) for a block/part given a color and an optional named material
+// ("wood" | "grass" | "fabric"). Falls back to the classic Plastic studs/inlet look when
+// materialKey is missing/"plastic"/unrecognized. Shared by createBlock/createPart here and
+// by main.js's Properties-panel material switcher (applyPartMaterial), so both places stay
+// in sync automatically.
+export function buildPartMaterials(materialKey, color, isBlock) {
+    const col = new THREE.Color(color);
+    const tex = materialKey && materialKey !== 'plastic' ? materialTextures[materialKey] : null;
+
+    if (tex) {
+        const mat = new THREE.MeshStandardMaterial({ map: tex, color: col, roughness: 0.9 });
+        return isBlock ? [mat, mat, mat, mat, mat, mat] : mat;
+    }
+
+    if (isBlock) {
+        const studMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.studs, color: col });
+        const inletMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.inlet, color: col });
+        const sideMat = new THREE.MeshStandardMaterial({ color: col });
+        return [sideMat, sideMat, studMat, inletMat, sideMat, sideMat];
+    }
+    return new THREE.MeshStandardMaterial({ map: surfaceManager.textures.studs, color: col, roughness: 0.5 });
+}
 
 export class World {
     constructor(scene) {
@@ -355,14 +378,14 @@ export class World {
                 } else if (d.type === 'meta_script') {
                     this.setScript(d.text);
                 } else if (d.type === 'block' || d.type === 'box') {
-                    const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags);
+                    const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags, d.props && d.props.material);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
                     placedCount++;
                 } else if (d.type === 'sphere' || d.type === 'cylinder' || d.type === 'wedge') {
-                    const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags);
+                    const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags, d.props && d.props.material);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
@@ -444,10 +467,10 @@ export class World {
         if (types.includes('finish')) this.finishPads.push(mesh);
     }
 
-    createPart(type, x, y, z, size, color, flags = ['static']) {
+    createPart(type, x, y, z, size, color, flags = ['static'], material = 'plastic') {
         // Wrapper for shapes
         if (type === 'block' || type === 'box') {
-            return this.createBlock(x, y, z, size.x, size.y, size.z, color, flags);
+            return this.createBlock(x, y, z, size.x, size.y, size.z, color, flags, material);
         }
 
         let geo;
@@ -485,12 +508,7 @@ export class World {
             geo.computeVertexNormals();
         }
 
-        const col = new THREE.Color(color);
-        const mat = new THREE.MeshStandardMaterial({ 
-            map: surfaceManager.textures.studs, 
-            color: col,
-            roughness: 0.5 
-        });
+        const mat = buildPartMaterials(material, color, false);
 
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.set(x, y, z);
@@ -501,7 +519,8 @@ export class World {
             type: type,
             w: size.x, h: size.y, d: size.z,
             color: color,
-            flags: flags
+            flags: flags,
+            props: { material: material || 'plastic' }
         };
         
         mesh.name = type.charAt(0).toUpperCase() + type.slice(1);
@@ -509,18 +528,11 @@ export class World {
         return mesh;
     }
 
-    createBlock(x, y, z, w, h, d, color, types = ['static']) {
+    createBlock(x, y, z, w, h, d, color, types = ['static'], material = 'plastic') {
         const geo = new THREE.BoxGeometry(w, h, d);
         boxUnwrapUVs(geo);
-        
-        const col = new THREE.Color(color);
 
-        const studMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.studs, color: col });
-        const inletMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.inlet, color: col });
-        const sideMat = new THREE.MeshStandardMaterial({ color: col });
-        
-        // Top=Studs, Bottom=Inlet
-        const mats = [sideMat, sideMat, studMat, inletMat, sideMat, sideMat];
+        const mats = buildPartMaterials(material, color, true);
         const mesh = new THREE.Mesh(geo, mats);
         mesh.position.set(x, y, z);
         
@@ -529,7 +541,8 @@ export class World {
             type: 'block',
             w: w, h: h, d: d,
             color: color,
-            flags: types
+            flags: types,
+            props: { material: material || 'plastic' }
         };
 
         if (types.includes('spawn')) {

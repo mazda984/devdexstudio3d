@@ -28,7 +28,7 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import nipplejs from 'nipplejs';
 import JSZip from 'jszip';
-import { World } from './World.js';
+import { World, buildPartMaterials } from './World.js';
 import { Player, createPlayerMesh } from './Player.js';
 import { RemotePlayer } from './RemotePlayer.js';
 import { InputManager } from './InputManager.js';
@@ -1353,7 +1353,27 @@ const propInputs = {
     rigAttack: document.getElementById('prop-rig-attack'),
     rigColor: document.getElementById('prop-rig-color'),
     attachRig: document.getElementById('prop-attach-rig'),
+    material: document.getElementById('prop-material'),
 };
+
+// Rebuilds a part's material(s) to match the chosen named material ("plastic"/"wood"/
+// "grass"/"fabric"), preserving its current color, and records the choice in
+// userData.serial.props.material so World.serialize()/loadFromData() carry it through
+// save/publish (i.e. it survives into the shared URL, not just the current session).
+function applyPartMaterial(mesh, materialKey) {
+    if (!mesh || !mesh.userData || !mesh.userData.serial) return;
+    const isBlock = mesh.userData.serial.type === 'block';
+    const currentMat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    const col = (currentMat && currentMat.color) ? currentMat.color.getHex() : (mesh.userData.serial.color ?? 0xffffff);
+
+    const newMat = buildPartMaterials(materialKey, col, isBlock);
+
+    if (Array.isArray(mesh.material)) mesh.material.forEach(m => m.dispose());
+    else if (mesh.material) mesh.material.dispose();
+    mesh.material = newMat;
+
+    mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, { material: materialKey || 'plastic' });
+}
 
 function updateStudioPropertiesUI() {
     if (!studioSelected) return;
@@ -1429,6 +1449,14 @@ function updateStudioPropertiesUI() {
     const mat = Array.isArray(m.material) ? m.material[0] : m.material;
     if (mat && mat.color) propInputs.color.value = '#' + (mat.color ? mat.color.getHexString() : 'cccccc');
     else if (propInputs.color) propInputs.color.value = '#cccccc';
+    if (propInputs.material) {
+        const matRow = propInputs.material.closest('.prop-row');
+        // Material only applies to plain parts (block/sphere/cylinder/wedge) - RigBots/
+        // models/weapons already returned earlier above, so anything reaching here qualifies.
+        const applicable = !!(m.userData && m.userData.serial && m.userData.serial.type);
+        if (matRow) matRow.style.display = applicable ? '' : 'none';
+        propInputs.material.value = (m.userData && m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
+    }
     // Assuming Standard Material props, though our blocks use array
     if (mat) {
         propInputs.reflect.value = 0; // Placeholder
@@ -1573,6 +1601,16 @@ const onPropChange = () => {
         // Just scale generic parts
         // This is tricky because we don't know base size easily without serial
         // skip for now
+    }
+
+    // Material (must run before the Colors block below so the freshly-rebuilt material
+    // still picks up whatever color is currently in the color picker).
+    if (propInputs.material) {
+        const wantedMat = propInputs.material.value;
+        const currentMat = (m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
+        if (wantedMat !== currentMat) {
+            applyPartMaterial(m, wantedMat);
+        }
     }
 
     // Colors
