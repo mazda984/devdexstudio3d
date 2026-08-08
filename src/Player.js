@@ -1492,6 +1492,28 @@ export class Player {
              }
         }
 
+        // Block-touch scripts ("OnTouch:<name> command? args..." - see World.parseScript).
+        // Each rule fires once per continuous touch (edge-triggered on entering the block),
+        // not every single frame while standing on it, so e.g. "place?" doesn't spam
+        // infinite parts and "giveTool?" doesn't spam infinite pickup messages.
+        if (world && world.scriptRules && world.scriptRules.length > 0) {
+            if (!this._scriptTouch) this._scriptTouch = {};
+            const pBox = new THREE.Box3().setFromObject(this.mesh);
+            world.scriptRules.forEach((rule, idx) => {
+                const target = (world.items || []).find(o => o.name === rule.blockName);
+                const wasTouching = !!this._scriptTouch[idx];
+                let touching = false;
+                if (target) {
+                    const tBox = new THREE.Box3().setFromObject(target);
+                    touching = pBox.intersectsBox(tBox);
+                }
+                this._scriptTouch[idx] = touching;
+                if (touching && !wasTouching) {
+                    this.runBlockScriptCommand(rule, target, world);
+                }
+            });
+        }
+
         // Finish Pad Check (Easy Obby end): play tada once and show bubble
         try {
             if (world && world.finishPads && world.finishPads.length > 0 && !this._hasFinished) {
@@ -1776,6 +1798,53 @@ export class Player {
         this.onGround = false;
         // Reset rotation if needed, or keep
         this.playSound(this.jumpBuffer, false, 1.5); // high pitch jump for tp
+    }
+
+    // Executes one parsed block-script rule (see World.parseScript) that just fired.
+    // `target` is the touched block's mesh (may be undefined if the named block
+    // couldn't be found - e.g. renamed/deleted after the script was written).
+    runBlockScriptCommand(rule, target, world) {
+        const args = rule.args || [];
+        // A trailing "player"/"Player" argument is just a readability marker in the
+        // script syntax (e.g. "kill? player") - strip it before reading real args.
+        const realArgs = args.filter((a) => a.toLowerCase() !== 'player');
+
+        switch (rule.command) {
+            case 'kill': {
+                this.fallApart();
+                break;
+            }
+            case 'givetool': {
+                const toolName = realArgs[0] || 'Tool';
+                if (!this.tools) this.tools = [];
+                if (!this.tools.includes(toolName)) this.tools.push(toolName);
+                this.chat(`Received: ${toolName}`);
+                break;
+            }
+            case 'tpto': {
+                const destName = realArgs[0];
+                const dest = destName ? (world.items || []).find(o => o.name === destName) : null;
+                if (dest) {
+                    const box = new THREE.Box3().setFromObject(dest);
+                    const topY = box.max.y;
+                    this.teleport(new THREE.Vector3(dest.position.x, topY + 1.2, dest.position.z));
+                } else {
+                    console.warn(`tpTo?: no block named "${destName}" found`);
+                }
+                break;
+            }
+            case 'place': {
+                const partName = realArgs[0];
+                if (!target || !world || typeof world.createBlock !== 'function') break;
+                const box = new THREE.Box3().setFromObject(target);
+                const topY = box.max.y;
+                const newPart = world.createBlock(target.position.x, topY + 0.5, target.position.z, 1, 1, 1, 0xffffff, ['static']);
+                if (partName) newPart.name = partName;
+                break;
+            }
+            default:
+                console.warn(`Unknown block-script command "${rule.command}?" in rule: ${rule.raw}`);
+        }
     }
 
     mount(vehicle) {

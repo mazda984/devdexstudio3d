@@ -683,6 +683,26 @@
                     this.presence[this.clientId] = this.presence[this.clientId] || { username: 'Guest' };
                 }
 
+                // Public STUN/TURN servers so connections still work across different networks
+                // (behind routers/firewalls/mobile data) - not just when both players happen to
+                // be on networks that allow direct/STUN-only WebRTC. Without a TURN fallback,
+                // two players can both "join the room" successfully (signaling works) while
+                // their actual media/data connection silently fails to establish - which looks
+                // exactly like "I don't see them and they don't see me" even though everything
+                // else (presence, chat) appears to be working.
+                _iceConfig() {
+                    return {
+                        iceServers: [
+                            { urls: 'stun:stun.l.google.com:19302' },
+                            { urls: 'stun:stun1.l.google.com:19302' },
+                            { urls: 'stun:stun2.l.google.com:19302' },
+                            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+                            { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+                            { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+                        ],
+                    };
+                }
+
                 async initialize() {
                     if (typeof Peer === 'undefined') {
                         console.warn('[WebRTC] PeerJS did not load (offline / blocked); playing solo.');
@@ -698,7 +718,7 @@
 
                         const joinAsClient = () => {
                             let peer;
-                            try { peer = new Peer(undefined, { debug: 0 }); } catch (e) { clearTimeout(giveUpTimer); this._goSolo(); finish(); return; }
+                            try { peer = new Peer(undefined, { debug: 0, config: this._iceConfig() }); } catch (e) { clearTimeout(giveUpTimer); this._goSolo(); finish(); return; }
                             peer.on('open', (id) => {
                                 this.peer = peer;
                                 this.clientId = id;
@@ -708,7 +728,8 @@
                                 this._hostConn = conn;
                                 this._wireConn(conn, hostId);
                                 conn.on('open', () => { clearTimeout(giveUpTimer); finish(); });
-                                conn.on('error', () => { clearTimeout(giveUpTimer); this._goSolo(); finish(); });
+                                conn.on('error', () => { clearTimeout(giveUpTimer); this._handleHostLost(); finish(); });
+                                conn.on('close', () => { this._handleHostLost(); });
                             });
                             peer.on('error', (err) => {
                                 console.warn('[WebRTC] Could not join room, playing solo:', err && err.type);
@@ -717,9 +738,10 @@
                                 finish();
                             });
                         };
+                        this._joinAsClient = joinAsClient;
 
                         let peer;
-                        try { peer = new Peer(hostId, { debug: 0 }); } catch (e) { clearTimeout(giveUpTimer); this._goSolo(); finish(); return; }
+                        try { peer = new Peer(hostId, { debug: 0, config: this._iceConfig() }); } catch (e) { clearTimeout(giveUpTimer); this._goSolo(); finish(); return; }
                         peer.on('open', (id) => {
                             this.peer = peer;
                             this.clientId = id;
@@ -781,6 +803,53 @@
                         }
                     });
                     conn.on('error', () => {});
+                }
+
+                // Called on a CLIENT when the connection to the host disappears (host tab
+                // closed/crashed/lost network). Previously this just gave up and went solo
+                // forever - meaning if the host left, every remaining client silently stopped
+                // being visible to each other for the rest of the session, even though the
+                // page/room still "worked". Instead, try to take over as host (or find whoever
+                // did) so the room keeps working for everyone still in it.
+                _handleHostLost() {
+                    if (this._reconnecting) return;
+                    this._reconnecting = true;
+                    try { if (this.peer) this.peer.destroy(); } catch (e) {}
+                    this._hostConn = null;
+                    this._conns.clear();
+                    const myOldPresence = this.presence[this.clientId];
+                    const hostId = this._roomId();
+                    // Small random delay so multiple orphaned clients don't all slam the
+                    // broker trying to claim the same host id at the exact same instant.
+                    setTimeout(() => {
+                        let peer;
+                        try { peer = new Peer(hostId, { debug: 0, config: this._iceConfig() }); } catch (e) { this._reconnecting = false; this._goSolo(); return; }
+                        peer.on('open', (id) => {
+                            this.peer = peer;
+                            this.clientId = id;
+                            this.isHost = true;
+                            this.presence[this.clientId] = myOldPresence || { username: 'Guest' };
+                            peer.on('connection', (conn) => this._registerClientConn(conn));
+                            this._reconnecting = false;
+                            this._firePresence();
+                        });
+                        peer.on('error', (err) => {
+                            if (err && err.type === 'unavailable-id') {
+                                // Someone else already re-hosted - join them instead.
+                                try { peer.destroy(); } catch (e) {}
+                                if (typeof this._joinAsClient === 'function') {
+                                    this._joinAsClient();
+                                    this._reconnecting = false;
+                                } else {
+                                    this._reconnecting = false;
+                                    this._goSolo();
+                                }
+                            } else {
+                                this._reconnecting = false;
+                                this._goSolo();
+                            }
+                        });
+                    }, 300 + Math.floor(Math.random() * 700));
                 }
 
                 _relay(packet, exceptPeerId) {
@@ -1092,6 +1161,11 @@
                     <span class="prop-label">Body Color</span>
                     <input type="color" id="prop-rig-color" class="prop-val">
                 </div>
+            </div>
+            <div class="prop-header" style="background: #eee; font-weight: normal;">Basic</div>
+            <div class="prop-row">
+                <span class="prop-label">Name</span>
+                <input type="text" id="prop-name" class="prop-val" placeholder="Part" maxlength="64">
             </div>
             <div class="prop-header" style="background: #eee; font-weight: normal;">Appearance</div>
             <div class="prop-row">

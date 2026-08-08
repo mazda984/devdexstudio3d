@@ -23,6 +23,11 @@ export class World {
         this.collidables = [];
         this.launchPads = [];
         this.teleporters = [];
+        // Block-touch scripts: raw text the Studio Script editor saves (persisted with the
+        // map itself, see serialize()/loadFromData() 'meta_script'), plus the parsed rules
+        // derived from it. See parseScript() below for the tiny language this supports.
+        this.script = '';
+        this.scriptRules = [];
         // RigBots flagged to attack the player live here so Player.js can hit-test them
         // the same way it already hit-tests killBricks.
         this.attackingRigs = [];
@@ -113,6 +118,8 @@ export class World {
         this.killBricks = [];
         this.launchPads = [];
         this.teleporters = [];
+        this.script = '';
+        this.scriptRules = [];
         this.finishPads = [];
         this.finishPads = [];
     }
@@ -140,11 +147,61 @@ export class World {
     }
 
     // New: JSON Serialization for User Worlds
+    // ------------------------------------------------------------------
+    // Block-touch scripting ("OnTouch:<blockName> command? args...")
+    //
+    // Small, line-based language for the Studio Script editor. Each line
+    // is one rule:
+    //   OnTouch:<BlockName> command? arg1 arg2 ...
+    // - "OnTouch:<BlockName>" says WHEN this rule fires: whenever a player
+    //   touches the part/block named <BlockName> (set via the Properties
+    //   panel's Name field).
+    // - "command?" (the "?" marks it as an action/command) says WHAT
+    //   happens. Built-in commands:
+    //     kill? player                 - kills the touching player
+    //     giveTool? <toolName> player  - gives the player a named tool
+    //     tpTo? <blockName> player     - teleports the player to that block
+    //     place? "<partName>" player   - spawns a copy of a named part on
+    //                                    top of the touched block
+    //   A trailing "player" argument is just a readability marker (only
+    //   players can trigger these right now) and is ignored by commands.
+    // Unknown/malformed lines are skipped (not an error) so partial/typo'd
+    // scripts still run the rules that DID parse correctly.
+    // ------------------------------------------------------------------
+    parseScript(text) {
+        const rules = [];
+        if (!text) return rules;
+        const lines = String(text).split(/\r?\n/);
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (!line || line.startsWith('--') || line.startsWith('//') || line.startsWith('#')) continue;
+            const m = line.match(/^OnTouch:(\S+)\s+(\w+)\?\s*(.*)$/i);
+            if (!m) continue;
+            const [, blockName, commandRaw, rest] = m;
+            const args = [];
+            const argRe = /"([^"]*)"|(\S+)/g;
+            let am;
+            while ((am = argRe.exec(rest)) !== null) {
+                args.push(am[1] !== undefined ? am[1] : am[2]);
+            }
+            rules.push({ blockName, command: commandRaw.toLowerCase(), args, raw: line });
+        }
+        return rules;
+    }
+
+    setScript(text) {
+        this.script = text || '';
+        this.scriptRules = this.parseScript(this.script);
+    }
+
     serialize() {
         const data = [];
         // Save BGM as a special meta entry or property
         if (this.bgm) {
             data.push({ type: 'meta_bgm', url: this.bgm });
+        }
+        if (this.script) {
+            data.push({ type: 'meta_script', text: this.script });
         }
 
         this.items.forEach(obj => {
@@ -152,6 +209,7 @@ export class World {
                 const s = obj.userData.serial;
                 data.push({
                     type: s.type,
+                    name: obj.name || undefined, // custom part name, used by block scripts (OnTouch:<name> ...)
                     x: obj.position.x,
                     y: obj.position.y,
                     z: obj.position.z,
@@ -213,16 +271,20 @@ export class World {
             try {
                 if (d.type === 'meta_bgm') {
                     this.bgm = d.url;
+                } else if (d.type === 'meta_script') {
+                    this.setScript(d.text);
                 } else if (d.type === 'block' || d.type === 'box') {
                     const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
                     placedCount++;
                 } else if (d.type === 'sphere' || d.type === 'cylinder' || d.type === 'wedge') {
                     const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
                     placedCount++;
                 } else if (d.type === 'rigbot') {

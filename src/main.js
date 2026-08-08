@@ -1286,6 +1286,7 @@ const updateStudioSelection = () => {
 };
 
 const propInputs = {
+    name: document.getElementById('prop-name'),
     color: document.getElementById('prop-color'),
     reflect: document.getElementById('prop-reflect'),
     trans: document.getElementById('prop-trans'),
@@ -1308,6 +1309,10 @@ const propInputs = {
 function updateStudioPropertiesUI() {
     if (!studioSelected) return;
     const m = studioSelected;
+
+    // Works the same for every object type (part, model, rig...) - lets scripts
+    // refer to this object by a friendly name (e.g. "OnTouch:oldurucu ...").
+    if (propInputs.name) propInputs.name.value = m.name || '';
 
     const rigSection = document.getElementById('prop-section-rig');
     if (m.userData && (m.userData.isRig || m.userData.isModel3D || m.userData.isWeaponPickup)) {
@@ -1437,6 +1442,13 @@ function updateStudioPropertiesUI() {
 const onPropChange = () => {
     if (!studioSelected) return;
     const m = studioSelected;
+
+    // Name applies the same way to every object type, and is what block scripts
+    // (OnTouch:<name> ...) reference - so set it before any type-specific early
+    // returns below.
+    if (propInputs.name) {
+        m.name = propInputs.name.value.trim();
+    }
     
     // Pos
     m.position.set(
@@ -1707,7 +1719,9 @@ document.getElementById('tool-rig').onclick = () => {
     spawnRig();
 };
 
-// Create Script (Coding Tab) handler - opens a draggable Lua coding tab
+// Create Script (Coding Tab) handler - opens a draggable block-script coding tab.
+// This is a small custom scripting language (NOT Lua) for triggering things when
+// a player touches a named block - see World.parseScript() for the exact syntax.
 document.getElementById('tool-script').onclick = () => {
     playSwitch();
 
@@ -1717,21 +1731,27 @@ document.getElementById('tool-script').onclick = () => {
         scriptWin = document.createElement('div');
         scriptWin.id = 'script-editor';
         scriptWin.className = 'xp-window';
-        scriptWin.style.width = '520px';
+        scriptWin.style.width = '560px';
         scriptWin.style.display = 'flex';
         scriptWin.innerHTML = `
             <div class="xp-title-bar">
-                <span>Script - Untitled.lua</span>
+                <span>Block Script</span>
                 <button id="btn-close-script" class="xp-btn-close">X</button>
             </div>
             <div class="xp-body" style="padding:8px; gap:8px;">
                 <div style="display:flex; gap:8px; align-items:center;">
                     <button id="btn-script-save" class="menu-btn" style="padding:6px 10px;">Save</button>
-                    <button id="btn-script-run" class="menu-btn" style="padding:6px 10px;">Run</button>
+                    <button id="btn-script-run" class="menu-btn" style="padding:6px 10px;">Run / Check</button>
                     <div style="flex:1;"></div>
-                    <div style="font-size:12px; color:#666;">Language: Lua</div>
                 </div>
-                <textarea id="script-textarea" spellcheck="false" style="width:100%; height:320px; font-family: 'Courier New', monospace; font-size:13px; background:#0f0f10; color:#e6e6e6; padding:8px; border:1px solid #444; box-sizing:border-box;"></textarea>
+                <div style="font-size:11px; color:#555; background:#f5f5f5; border:1px solid #ddd; padding:6px 8px; line-height:1.5;">
+                    Name a block in Properties, then write rules here, one per line:<br>
+                    <code>OnTouch:oldurucu kill? player</code> - kills the player who touches the block named "oldurucu"<br>
+                    <code>OnTouch:blok giveTool? Sword player</code> - gives a tool named "Sword"<br>
+                    <code>OnTouch:blok tpTo? SpawnPoint player</code> - teleports the player to the block named "SpawnPoint"<br>
+                    <code>OnTouch:blok place? "Part" player</code> - spawns a new part on top of the touched block
+                </div>
+                <textarea id="script-textarea" spellcheck="false" style="width:100%; height:280px; font-family: 'Courier New', monospace; font-size:13px; background:#0f0f10; color:#e6e6e6; padding:8px; border:1px solid #444; box-sizing:border-box;"></textarea>
                 <div style="display:flex; gap:8px; justify-content:flex-end;">
                     <button id="btn-script-close" class="menu-btn">Close</button>
                 </div>
@@ -1744,9 +1764,11 @@ document.getElementById('tool-script').onclick = () => {
         makeDraggable(scriptWin);
         makeResizable(scriptWin);
 
-        // Prefill sample Lua snippet
         const ta = scriptWin.querySelector('#script-textarea');
-        ta.value = `-- Example Lua script\nlocal message = \"Hello from Script\"\nlocal flag = true\n\nprint(message, flag)\n\n-- Function example\nfunction greet(name)\n  return \"Hello, \" .. name\nend\n\nprint(greet(\"Player\"))`;
+        // Prefer whatever's already saved on the current map, falling back to a local
+        // draft (e.g. if the map hasn't been saved/reloaded yet), then a starter example.
+        ta.value = world.script || localStorage.getItem('nblox_script_untitled') ||
+            `OnTouch:oldurucu kill? player\nOnTouch:blok place? "Part" player`;
 
         // Hook up buttons
         scriptWin.querySelector('#btn-close-script').addEventListener('click', () => {
@@ -1758,33 +1780,37 @@ document.getElementById('tool-script').onclick = () => {
             scriptWin.style.display = 'none';
         });
 
-        // Save simply stores script to localStorage keyed by name
+        // Save: stores the script ON THE MAP itself (so it's included when you publish/
+        // share it), plus a local draft backup.
         scriptWin.querySelector('#btn-script-save').addEventListener('click', () => {
             playSwitch();
             const content = ta.value;
-            try {
-                localStorage.setItem('nblox_script_untitled', content);
-                addChatMessage('System', 'Script saved locally (nblox_script_untitled).');
-            } catch (e) {
-                console.warn('Failed to save script:', e);
-                addChatMessage('System', 'Failed to save script locally.');
-            }
+            world.setScript(content);
+            try { localStorage.setItem('nblox_script_untitled', content); } catch (e) {}
+            const count = world.scriptRules.length;
+            addChatMessage('System', `Script saved: ${count} rule${count === 1 ? '' : 's'} loaded.`);
         });
 
-        // Run: show the Lua code as text output in chat (since executing Lua in browser isn't supported)
+        // Run / Check: re-parses without saving, and reports back which lines parsed as
+        // real rules vs. which ones were ignored (typo'd/unsupported), so you can fix
+        // them before Save.
         scriptWin.querySelector('#btn-script-run').addEventListener('click', () => {
             playSwitch();
             const content = ta.value;
-            const preview = content.split('\\n').slice(0, 6).join('\\n');
-            addChatMessage('System', 'Run (preview):\\n' + preview.replace(/\\n/g, ' | '));
-            alert('Running Lua is not supported in this browser; preview posted to chat.');
+            const rules = world.parseScript(content);
+            const nonEmptyLines = content.split(/\r?\n/).filter(l => {
+                const t = l.trim();
+                return t && !t.startsWith('--') && !t.startsWith('//') && !t.startsWith('#');
+            });
+            const ignored = nonEmptyLines.length - rules.length;
+            addChatMessage('System', `Check: ${rules.length} rule(s) recognized${ignored > 0 ? `, ${ignored} line(s) not understood` : ''}.`);
+            rules.forEach(r => addChatMessage('System', `  OnTouch:${r.blockName} → ${r.command}?(${r.args.join(', ')})`));
         });
     } else {
-        // Restore textarea content from storage if empty
+        // Restore textarea content if it's empty (e.g. window was created but never filled)
         const ta = scriptWin.querySelector('#script-textarea');
         if (ta && !ta.value) {
-            const saved = localStorage.getItem('nblox_script_untitled');
-            if (saved) ta.value = saved;
+            ta.value = world.script || localStorage.getItem('nblox_script_untitled') || '';
         }
         scriptWin.style.display = 'flex';
     }
