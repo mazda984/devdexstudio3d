@@ -725,11 +725,20 @@ export class Player {
         }
 
         // 2. Determine attachment point
+        // 2. Decide what to attach the hat to. Normally this is the head
+        // cube itself. The only exception is when a custom GLB head model
+        // has replaced the default box head (in which case this.head is
+        // hidden and we look for that replacement by name). Previously this
+        // matched the FIRST non-head child of the whole body mesh - which is
+        // the torso (added before the head in createPlayerMesh) - so hats
+        // ended up welded to the torso instead of the head: they'd sit near
+        // chest height, clipped into/behind the body, which is what made
+        // equipped items look broken/"merged into" the character.
         let attachTarget = this.head;
-        if (this.mesh && this.mesh.children && this.mesh.children.length > 0) {
+        if (this.mesh && this.mesh.children && this.mesh.children.length > 0 && this.head && !this.head.visible) {
             for (const c of this.mesh.children) {
                 if (c === this.head) continue;
-                if (c.isObject3D && (!this.head.visible || c.name.toLowerCase().includes('head') || c.type === 'Group' || c.isMesh)) {
+                if (c.isObject3D && c.name && c.name.toLowerCase().includes('head')) {
                     attachTarget = c;
                     break;
                 }
