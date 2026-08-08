@@ -1635,6 +1635,17 @@ Object.values(propInputs).forEach(input => {
 
 document.getElementById('tool-publish').onclick = async () => {
     playSwitch();
+    // Safety net: if the Block Script editor is open with edits that were never explicitly
+    // saved (e.g. user is mid-edit and hits Publish directly), grab its current content so
+    // Publish never ships a stale/missing script.
+    try {
+        const scriptWin = document.getElementById('script-editor');
+        if (scriptWin) {
+            const ta = scriptWin.querySelector('#script-textarea');
+            if (ta) world.setScript(ta.value);
+        }
+    } catch (e) {}
+
     let defaultName = "";
     if (editingGameName) {
         defaultName = isRemixMode ? `Remix of ${editingGameName}` : editingGameName;
@@ -1821,25 +1832,36 @@ document.getElementById('tool-script').onclick = () => {
         ta.value = world.script || localStorage.getItem('nblox_script_untitled') ||
             `OnTouch:oldurucu kill? player\nOnTouch:blok place? "Part" player`;
 
-        // Hook up buttons
+        // Save: stores the script ON THE MAP itself (so it's included when you publish/
+        // share it), plus a local draft backup.
+        const saveScriptNow = (silent) => {
+            const content = ta.value;
+            world.setScript(content);
+            try { localStorage.setItem('nblox_script_untitled', content); } catch (e) {}
+            if (!silent) {
+                const count = world.scriptRules.length;
+                addChatMessage('System', `Script saved: ${count} rule${count === 1 ? '' : 's'} loaded.`);
+            }
+        };
+
+        // Close/X used to just hide the window WITHOUT saving, so if you typed a script
+        // and closed instead of clicking "Save", it silently never made it onto the map
+        // (and therefore never made it into a Publish link either). Auto-save on close so
+        // that can't happen - "Save" still exists for an explicit confirmation + rule count.
         scriptWin.querySelector('#btn-close-script').addEventListener('click', () => {
+            saveScriptNow(true);
             playSwitch();
             scriptWin.style.display = 'none';
         });
         scriptWin.querySelector('#btn-script-close').addEventListener('click', () => {
+            saveScriptNow(true);
             playSwitch();
             scriptWin.style.display = 'none';
         });
 
-        // Save: stores the script ON THE MAP itself (so it's included when you publish/
-        // share it), plus a local draft backup.
         scriptWin.querySelector('#btn-script-save').addEventListener('click', () => {
             playSwitch();
-            const content = ta.value;
-            world.setScript(content);
-            try { localStorage.setItem('nblox_script_untitled', content); } catch (e) {}
-            const count = world.scriptRules.length;
-            addChatMessage('System', `Script saved: ${count} rule${count === 1 ? '' : 's'} loaded.`);
+            saveScriptNow(false);
         });
 
         // Run / Check: re-parses without saving, and reports back which lines parsed as
