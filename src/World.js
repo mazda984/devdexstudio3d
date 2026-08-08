@@ -28,6 +28,7 @@ export class World {
         // derived from it. See parseScript() below for the tiny language this supports.
         this.script = '';
         this.scriptRules = [];
+        this._tickState = {};
         // RigBots flagged to attack the player live here so Player.js can hit-test them
         // the same way it already hit-tests killBricks.
         this.attackingRigs = [];
@@ -120,6 +121,7 @@ export class World {
         this.teleporters = [];
         this.script = '';
         this.scriptRules = [];
+        this._tickState = {};
         this.finishPads = [];
         this.finishPads = [];
     }
@@ -175,16 +177,33 @@ export class World {
         for (const raw of lines) {
             const line = raw.trim();
             if (!line || line.startsWith('--') || line.startsWith('//') || line.startsWith('#')) continue;
-            const m = line.match(/^OnTouch:(\S+)\s+(\w+)\?\s*(.*)$/i);
-            if (!m) continue;
-            const [, blockName, commandRaw, rest] = m;
-            const args = [];
-            const argRe = /"([^"]*)"|(\S+)/g;
-            let am;
-            while ((am = argRe.exec(rest)) !== null) {
-                args.push(am[1] !== undefined ? am[1] : am[2]);
+
+            const parseArgs = (rest) => {
+                const args = [];
+                const argRe = /"([^"]*)"|(\S+)/g;
+                let am;
+                while ((am = argRe.exec(rest)) !== null) {
+                    args.push(am[1] !== undefined ? am[1] : am[2]);
+                }
+                return args;
+            };
+
+            // OnTouch:<blockName> command? args... - fires when a player touches <blockName>.
+            const touchMatch = line.match(/^OnTouch:(\S+)\s+(\w+)\?\s*(.*)$/i);
+            if (touchMatch) {
+                const [, blockName, commandRaw, rest] = touchMatch;
+                rules.push({ event: 'touch', blockName, command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
+                continue;
             }
-            rules.push({ blockName, command: commandRaw.toLowerCase(), args, raw: line });
+
+            // OnTickUpdate:command? args... - fires repeatedly on a fixed timer (not tied to
+            // any particular block, so no block name between the colon and the command).
+            const tickMatch = line.match(/^OnTickUpdate:(\w+)\?\s*(.*)$/i);
+            if (tickMatch) {
+                const [, commandRaw, rest] = tickMatch;
+                rules.push({ event: 'tick', command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
+                continue;
+            }
         }
         return rules;
     }
@@ -192,6 +211,68 @@ export class World {
     setScript(text) {
         this.script = text || '';
         this.scriptRules = this.parseScript(this.script);
+    }
+
+    // Named colors supported by changecolor? (in addition to plain "#rrggbb" hex).
+    static COLOR_NAMES = {
+        red: 0xff0000, green: 0x00cc00, blue: 0x0066ff, yellow: 0xffdd00,
+        orange: 0xff8800, purple: 0x9900cc, pink: 0xff66cc, white: 0xffffff,
+        black: 0x111111, gray: 0x888888, grey: 0x888888, cyan: 0x00e5ff,
+        brown: 0x7a4a2a, lime: 0x88ff00, magenta: 0xff00ff,
+    };
+
+    static parseColorArg(arg) {
+        if (!arg) return 0xffffff;
+        const s = String(arg).trim();
+        if (s.startsWith('#')) {
+            const hex = parseInt(s.slice(1), 16);
+            return Number.isNaN(hex) ? 0xffffff : hex;
+        }
+        return World.COLOR_NAMES[s.toLowerCase()] ?? 0xffffff;
+    }
+
+    // Runs every OnTickUpdate:command? rule on a fixed timer (currently every 1.4s,
+    // independent of framerate). Call this once per frame during gameplay.
+    updateScriptTicks(dt) {
+        if (!this.scriptRules || this.scriptRules.length === 0) return;
+        if (!this._tickState) this._tickState = {};
+        const TICK_INTERVAL = 1.4;
+        this.scriptRules.forEach((rule, idx) => {
+            if (rule.event !== 'tick') return;
+            if (!this._tickState[idx]) this._tickState[idx] = { elapsed: 0, toggled: false };
+            const st = this._tickState[idx];
+            st.elapsed += dt;
+            if (st.elapsed >= TICK_INTERVAL) {
+                st.elapsed -= TICK_INTERVAL;
+                this.runTickScriptCommand(rule, st);
+            }
+        });
+    }
+
+    runTickScriptCommand(rule, state) {
+        switch (rule.command) {
+            case 'changecolor': {
+                // changecolor? <blockName> <colorName> - blinks the named block between its
+                // current color and <colorName>, flipping every tick (~1.4s), so over two
+                // ticks it goes original -> color -> original -> color ...
+                const [blockName, colorArg] = rule.args;
+                const target = this.items.find(o => o.name === blockName);
+                if (!target || !target.material) return;
+                const mat0 = Array.isArray(target.material) ? target.material[0] : target.material;
+                if (state.originalColor === undefined) state.originalColor = mat0.color.getHex();
+
+                const goingToColor = !state.toggled;
+                const applyHex = goingToColor ? World.parseColorArg(colorArg) : state.originalColor;
+                const col = new THREE.Color(applyHex);
+                if (Array.isArray(target.material)) target.material.forEach(m => m.color.copy(col));
+                else target.material.color.copy(col);
+                if (target.userData.serial) target.userData.serial.color = applyHex;
+                state.toggled = goingToColor;
+                break;
+            }
+            default:
+                console.warn(`Unknown OnTickUpdate command "${rule.command}?" in rule: ${rule.raw}`);
+        }
     }
 
     serialize() {

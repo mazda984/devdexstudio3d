@@ -1500,6 +1500,7 @@ export class Player {
             if (!this._scriptTouch) this._scriptTouch = {};
             const pBox = new THREE.Box3().setFromObject(this.mesh);
             world.scriptRules.forEach((rule, idx) => {
+                if (rule.event !== 'touch') return;
                 const target = (world.items || []).find(o => o.name === rule.blockName);
                 const wasTouching = !!this._scriptTouch[idx];
                 let touching = false;
@@ -1834,11 +1835,28 @@ export class Player {
                 break;
             }
             case 'place': {
-                const partName = realArgs[0];
-                if (!target || !world || typeof world.createBlock !== 'function') break;
-                const box = new THREE.Box3().setFromObject(target);
-                const topY = box.max.y;
-                const newPart = world.createBlock(target.position.x, topY + 0.5, target.position.z, 1, 1, 1, 0xffffff, ['static']);
+                // place? "<partName>" player                     - on top of the touched block
+                // place? "<partName>" tpTo:<otherBlockName> player - on top of a DIFFERENT block
+                const partName = realArgs.find(a => !/^tpto:/i.test(a));
+                const tpToArg = realArgs.find(a => /^tpto:/i.test(a));
+                let spawnPos = null;
+                if (tpToArg) {
+                    const destName = tpToArg.slice(tpToArg.indexOf(':') + 1);
+                    const dest = (world.items || []).find(o => o.name === destName);
+                    if (dest) {
+                        const dBox = new THREE.Box3().setFromObject(dest);
+                        spawnPos = { x: dest.position.x, y: dBox.max.y + 0.5, z: dest.position.z };
+                    } else {
+                        console.warn(`place?: tpTo target "${destName}" not found`);
+                    }
+                }
+                if (!spawnPos) {
+                    if (!target) break;
+                    const box = new THREE.Box3().setFromObject(target);
+                    spawnPos = { x: target.position.x, y: box.max.y + 0.5, z: target.position.z };
+                }
+                if (!world || typeof world.createBlock !== 'function') break;
+                const newPart = world.createBlock(spawnPos.x, spawnPos.y, spawnPos.z, 1, 1, 1, 0xffffff, ['static']);
                 if (partName) newPart.name = partName;
                 break;
             }

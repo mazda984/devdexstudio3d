@@ -1749,7 +1749,9 @@ document.getElementById('tool-script').onclick = () => {
                     <code>OnTouch:oldurucu kill? player</code> - kills the player who touches the block named "oldurucu"<br>
                     <code>OnTouch:blok giveTool? Sword player</code> - gives a tool named "Sword"<br>
                     <code>OnTouch:blok tpTo? SpawnPoint player</code> - teleports the player to the block named "SpawnPoint"<br>
-                    <code>OnTouch:blok place? "Part" player</code> - spawns a new part on top of the touched block
+                    <code>OnTouch:blok place? "Part" player</code> - spawns a new part on top of the touched block<br>
+                    <code>OnTouch:blok place? "Part" tpTo:SpawnPoint player</code> - spawns it on top of a DIFFERENT block instead<br>
+                    <code>OnTickUpdate:changecolor? part red</code> - every ~1.4s, blinks the block named "part" between its color and red
                 </div>
                 <textarea id="script-textarea" spellcheck="false" style="width:100%; height:280px; font-family: 'Courier New', monospace; font-size:13px; background:#0f0f10; color:#e6e6e6; padding:8px; border:1px solid #444; box-sizing:border-box;"></textarea>
                 <div style="display:flex; gap:8px; justify-content:flex-end;">
@@ -1804,7 +1806,7 @@ document.getElementById('tool-script').onclick = () => {
             });
             const ignored = nonEmptyLines.length - rules.length;
             addChatMessage('System', `Check: ${rules.length} rule(s) recognized${ignored > 0 ? `, ${ignored} line(s) not understood` : ''}.`);
-            rules.forEach(r => addChatMessage('System', `  OnTouch:${r.blockName} → ${r.command}?(${r.args.join(', ')})`));
+            rules.forEach(r => addChatMessage('System', `  ${r.event === 'tick' ? 'OnTickUpdate' : 'OnTouch:' + r.blockName} → ${r.command}?(${r.args.join(', ')})`));
         });
     } else {
         // Restore textarea content if it's empty (e.g. window was created but never filled)
@@ -5557,16 +5559,44 @@ function updatePlaying(dt) {
 
     // Unanchored Parts Physics: any part with Anchored=false falls with gravity, exactly
     // like the player/RigBots (also used for parts that fell/detached off a RigBot weld,
-    // or got launched by a rocket explosion - see explodeAt()).
+    // or got launched by a rocket explosion - see explodeAt()). Also lets the player shove
+    // these parts around by walking into them (e.g. a football/soccer ball).
     if (world.dynamicObjects && world.dynamicObjects.length > 0) {
         const PART_GRAVITY = -100;
         const HORIZONTAL_DAMPING = 0.92; // per-frame-ish decay so blown-around blocks settle down
+        const MAX_PUSH_SPEED = 14; // cap so standing against a part doesn't fling it away instantly
         const partRaycaster = new THREE.Raycaster();
         const downVec2 = new THREE.Vector3(0, -1, 0);
+        const playerBoxForPush = new THREE.Box3().setFromObject(player.mesh);
         world.dynamicObjects.forEach(part => {
             if (part.userData.velocityY === undefined) part.userData.velocityY = 0;
             if (part.userData.velocityX === undefined) part.userData.velocityX = 0;
             if (part.userData.velocityZ === undefined) part.userData.velocityZ = 0;
+
+            // Push: player walking into an unanchored part shoves it in the direction
+            // they're pushing from, like kicking a ball.
+            const partBoxPre = new THREE.Box3().setFromObject(part);
+            if (!player.isDead && playerBoxForPush.intersectsBox(partBoxPre)) {
+                const dx = part.position.x - player.position.x;
+                const dz = part.position.z - player.position.z;
+                const dist = Math.hypot(dx, dz);
+                if (dist > 0.0001) {
+                    const nx = dx / dist, nz = dz / dist;
+                    const PUSH_ACCEL = 26;
+                    part.userData.velocityX += nx * PUSH_ACCEL * dt;
+                    part.userData.velocityZ += nz * PUSH_ACCEL * dt;
+                    // Nudge apart immediately so the player doesn't stay overlapping it and
+                    // keep re-triggering the push every single frame at full force.
+                    part.position.x += nx * 0.08;
+                    part.position.z += nz * 0.08;
+                }
+            }
+            const speed = Math.hypot(part.userData.velocityX, part.userData.velocityZ);
+            if (speed > MAX_PUSH_SPEED) {
+                const scale = MAX_PUSH_SPEED / speed;
+                part.userData.velocityX *= scale;
+                part.userData.velocityZ *= scale;
+            }
 
             part.userData.velocityY += PART_GRAVITY * dt;
             part.position.y += part.userData.velocityY * dt;
@@ -5586,6 +5616,10 @@ function updatePlaying(dt) {
             }
         });
     }
+
+    // Block-touch/tick scripts: OnTickUpdate:command? rules run on their own fixed timer
+    // here (once per frame, world-level - not tied to any particular player).
+    world.updateScriptTicks(dt);
 
     // RigBot Physics/AI: every RigBot falls with gravity like the player; ones with
     // "Attacks Player" enabled also walk toward the player while grounded.
