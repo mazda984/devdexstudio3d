@@ -1873,10 +1873,14 @@ export class Player {
                 break;
             }
             case 'place': {
-                // place? "<partName>" player                     - on top of the touched block
-                // place? "<partName>" tpTo:<otherBlockName> player - on top of a DIFFERENT block
-                const partName = realArgs.find(a => !/^tpto:/i.test(a));
+                // place? "<partName>" player                             - on top of the touched block
+                // place? "<partName>" tpTo:<otherBlockName> player       - on top of a DIFFERENT block
+                // place? "<partName>" tpTo:<otherBlockName> anchor player - same, but the new
+                //   part spawns with Anchored OFF (falls/pushes like any other unanchored
+                //   part instead of staying fixed in place - e.g. lava that should drip/fall).
+                const partName = realArgs.find(a => !/^tpto:/i.test(a) && !/^anchor$/i.test(a) && !/^player$/i.test(a));
                 const tpToArg = realArgs.find(a => /^tpto:/i.test(a));
+                const wantsUnanchored = realArgs.some(a => /^anchor$/i.test(a));
                 let spawnPos = null;
                 if (tpToArg) {
                     const destName = tpToArg.slice(tpToArg.indexOf(':') + 1);
@@ -1896,6 +1900,17 @@ export class Player {
                 if (!world || typeof world.createBlock !== 'function') break;
                 const newPart = world.createBlock(spawnPos.x, spawnPos.y, spawnPos.z, 1, 1, 1, 0xffffff, ['static']);
                 if (partName) newPart.name = partName;
+                if (wantsUnanchored) {
+                    // Same bookkeeping loadFromData's _applyAnchorState does for a saved
+                    // Anchored=false part: mark it, zero its fall speed, and register it with
+                    // the gravity/push physics loop (and, on Publish, this also makes it
+                    // serialize back out with anchored:false - see World.serialize()).
+                    newPart.userData.anchored = false;
+                    newPart.userData.velocityY = 0;
+                    if (world.dynamicObjects && world.dynamicObjects.indexOf(newPart) === -1) {
+                        world.dynamicObjects.push(newPart);
+                    }
+                }
                 break;
             }
             default:

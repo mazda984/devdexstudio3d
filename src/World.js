@@ -407,6 +407,39 @@ export class World {
         else if (mesh.material) mesh.material.dispose();
     }
 
+    // Bird: simple decorative prop that bobs/drifts in place (spawned via the Studio
+    // toolbox's "Bird" button). Lives here (rather than inline in main.js) so the exact
+    // same construction code runs both when you place one AND when a saved/published map
+    // is reloaded - previously it was only ever built in main.js's click handler with no
+    // userData.serial, so World.serialize() silently skipped it and it vanished from any
+    // saved/published game.
+    createBird(x, y, z) {
+        const birdGeom = new THREE.BoxGeometry(1, 0.6, 0.6);
+        boxUnwrapUVs(birdGeom);
+        const birdMat = new THREE.MeshStandardMaterial({ color: 0xffcc00 });
+        const bird = new THREE.Mesh(birdGeom, birdMat);
+        bird.position.set(x, y, z);
+        bird.name = 'Bird';
+        bird.userData._bird = { time: 0, speed: 1 + Math.random(), baseY: y };
+        bird.userData.serial = { type: 'bird', w: 1, h: 0.6, d: 0.6, color: 0xffcc00, flags: ['static'], props: {} };
+
+        this.mapGroup.add(bird);
+        this.items.push(bird);
+
+        this.animated.push({
+            mesh: bird,
+            time: 0,
+            update: (dt, obj) => {
+                obj.time += dt * obj.mesh.userData._bird.speed;
+                obj.mesh.position.x += Math.cos(obj.time) * 0.02 * 10 * dt * 60;
+                obj.mesh.position.y = obj.mesh.userData._bird.baseY + Math.sin(obj.time * 2) * 0.8;
+                obj.mesh.rotation.y = Math.sin(obj.time) * 0.3;
+            }
+        });
+
+        return bird;
+    }
+
     serialize() {
         const data = [];
         // Save BGM as a special meta entry or property
@@ -499,6 +532,10 @@ export class World {
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
+                    placedCount++;
+                } else if (d.type === 'bird') {
+                    const mesh = this.createBird(d.x, d.y, d.z);
+                    if (d.name) mesh.name = d.name;
                     placedCount++;
                 } else if (d.type === 'rigbot') {
                     // Can't build the player-model mesh here; hand it off to main.js after load.

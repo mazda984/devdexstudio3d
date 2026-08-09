@@ -2047,25 +2047,7 @@ document.getElementById('tool-toolbox')?.addEventListener('click', () => {
             playSwitch();
             const x = camera.position.x + camera.getWorldDirection(new THREE.Vector3()).x * 12;
             const z = camera.position.z + camera.getWorldDirection(new THREE.Vector3()).z * 12;
-            const birdGeom = new THREE.BoxGeometry(1, 0.6, 0.6);
-            boxUnwrapUVs(birdGeom);
-            const birdMat = new THREE.MeshStandardMaterial({ color: 0xffcc00 });
-            const bird = new THREE.Mesh(birdGeom, birdMat);
-            bird.position.set(x, 6, z);
-            bird.userData._bird = { time: 0, speed: 1 + Math.random() };
-            world.mapGroup.add(bird);
-            world.items.push(bird); // treat as decor
-            // add an updater hook
-            world.animated.push({
-                mesh: bird,
-                time: 0,
-                update: (dt, obj) => {
-                    obj.time += dt * obj.mesh.userData._bird.speed;
-                    obj.mesh.position.x += Math.cos(obj.time) * 0.02 * 10 * dt * 60;
-                    obj.mesh.position.y = 6 + Math.sin(obj.time * 2) * 0.8;
-                    obj.mesh.rotation.y = Math.sin(obj.time) * 0.3;
-                }
-            });
+            world.createBird(x, 6, z);
             updateExplorer();
         });
 
