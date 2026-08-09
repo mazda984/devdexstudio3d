@@ -12,17 +12,28 @@ import * as THREE from 'three';
 import { boxUnwrapUVs, surfaceManager, materialTextures } from './utils.js';
 import { Vehicle } from './Vehicle.js';
 
+// Per-named-material physical tweaks layered on top of the base color+texture, so e.g.
+// water actually looks/feels wet (translucent, low roughness) instead of just being a
+// blue-tinted matte cube, and metal has some shine. Anything not listed here just uses
+// the plain default (opaque, roughness 0.9, matches the old wood/grass/fabric behavior).
+const MATERIAL_PROPS = {
+    water: { transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.05 },
+    metal: { roughness: 0.35, metalness: 0.6 },
+    slate: { roughness: 0.95, metalness: 0 }
+};
+
 // Builds the material(s) for a block/part given a color and an optional named material
-// ("wood" | "grass" | "fabric"). Falls back to the classic Plastic studs/inlet look when
-// materialKey is missing/"plastic"/unrecognized. Shared by createBlock/createPart here and
-// by main.js's Properties-panel material switcher (applyPartMaterial), so both places stay
-// in sync automatically.
+// ("wood" | "grass" | "fabric" | "water" | "metal" | "slate"). Falls back to the classic
+// Plastic studs/inlet look when materialKey is missing/"plastic"/unrecognized. Shared by
+// createBlock/createPart here and by main.js's Properties-panel material switcher
+// (applyPartMaterial), so both places stay in sync automatically.
 export function buildPartMaterials(materialKey, color, isBlock) {
     const col = new THREE.Color(color);
     const tex = materialKey && materialKey !== 'plastic' ? materialTextures[materialKey] : null;
 
     if (tex) {
-        const mat = new THREE.MeshStandardMaterial({ map: tex, color: col, roughness: 0.9 });
+        const extra = MATERIAL_PROPS[materialKey] || {};
+        const mat = new THREE.MeshStandardMaterial({ map: tex, color: col, roughness: 0.9, ...extra });
         return isBlock ? [mat, mat, mat, mat, mat, mat] : mat;
     }
 

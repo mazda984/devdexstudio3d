@@ -966,7 +966,7 @@ let gameBGM = null; // Custom game music
 const tryPlayBGM = () => {
     if (uiAudioCtx && uiAudioCtx.state === 'suspended') uiAudioCtx.resume();
     
-    if (gameState === 'PLAYING') {
+    if (gameState === 'PLAYING' || gameState === 'TEST') {
         if (menuBGM.paused === false) menuBGM.pause();
         if (gameBGM && gameBGM.paused) gameBGM.play().catch(()=>{});
     } else {
@@ -3055,6 +3055,21 @@ btnPlaySolo.onclick = () => {
     
     player.mesh.visible = true;
     player.respawn(world);
+
+    // Handle Custom Music: Play Test used to never touch world.bgm at all, so any music you
+    // added in Studio only ever actually played once you Published and opened the real link -
+    // testing it here was silent. Mirror the same logic startGame() uses for a real play.
+    menuBGM.pause();
+    if (gameBGM) {
+        gameBGM.pause();
+        gameBGM = null;
+    }
+    if (world.bgm) {
+        gameBGM = new Audio(world.bgm);
+        gameBGM.loop = true;
+        gameBGM.volume = 0.5;
+        gameBGM.play().catch(e => console.log("Audio play failed", e));
+    }
 };
 
 // CREATE Button launches Studio in a "Create" mode for users to build their own level
@@ -3116,6 +3131,13 @@ btnStopTest.onclick = () => {
     resetWeaponState();
     // Restore selection?
     if (studioSelected) transformControl.attach(studioSelected);
+
+    // Stop whatever custom music Play Test started, so it doesn't keep playing underneath
+    // the Studio editor after you stop testing.
+    if (gameBGM) {
+        gameBGM.pause();
+        gameBGM = null;
+    }
 };
 
 document.getElementById('btn-studio-exit').onclick = () => {

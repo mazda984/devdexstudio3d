@@ -1122,7 +1122,13 @@ export class Player {
         }
 
         const killBricks = world && world.killBricks ? world.killBricks : [];
-        const collidables = world && world.collidables ? world.collidables : [];
+        const collidablesAll = world && world.collidables ? world.collidables : [];
+        // Water material ("Water" in the Properties panel material dropdown) is meant to be
+        // swum through, not stood on like a solid block - so it's excluded from the normal
+        // solid-collision list and instead handled separately below as a swim volume.
+        const isWaterObj = (o) => !!(o && o.userData && o.userData.serial && o.userData.serial.props && o.userData.serial.props.material === 'water');
+        const collidables = collidablesAll.filter(o => !isWaterObj(o));
+        const waterVolumes = collidablesAll.filter(isWaterObj);
 
         // Handle Death State
         if (this.isDead) {
@@ -1267,7 +1273,39 @@ export class Player {
         }
 
         // Physics
-        this.velocity.y += this.gravity * dt;
+        // Swimming: figure out if the player's torso is currently inside a Water-material
+        // block. Water blocks were already excluded from `collidables` above (so walking
+        // into one doesn't stop you like a wall / stand on it like a floor); this is the
+        // separate check that makes being inside one actually feel like water instead of
+        // just empty space with normal gravity.
+        this.inWater = false;
+        if (waterVolumes.length > 0) {
+            const chestY = this.position.y + 2.2; // roughly torso height
+            for (const w of waterVolumes) {
+                const wBox = this.tempBox.setFromObject(w);
+                if (this.position.x >= wBox.min.x && this.position.x <= wBox.max.x &&
+                    this.position.z >= wBox.min.z && this.position.z <= wBox.max.z &&
+                    chestY >= wBox.min.y && chestY <= wBox.max.y) {
+                    this.inWater = true;
+                    break;
+                }
+            }
+        }
+
+        if (this.inWater) {
+            // Much lighter "gravity" (near-neutral buoyancy) plus drag, so the player sinks/
+            // floats gently instead of plummeting - and holding Jump swims upward for as
+            // long as they're submerged, instead of a single hop.
+            this.velocity.y += this.gravity * 0.15 * dt;
+            this.velocity.y *= Math.pow(0.85, dt * 60);
+            if (move.jump) {
+                this.velocity.y = Math.max(this.velocity.y, this.swimUpSpeed || 6);
+            }
+            this.onGround = false;
+            this.coyoteTimer = 0;
+        } else {
+            this.velocity.y += this.gravity * dt;
+        }
 
         // Horizontal Movement
         const moveVec = new THREE.Vector3(move.x, 0, move.z).normalize().multiplyScalar(this.speed);

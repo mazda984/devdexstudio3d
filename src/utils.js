@@ -128,7 +128,7 @@ export const surfaceManager = new SurfaceManager();
 export const materialTextures = {};
 (() => {
     const loader = new THREE.TextureLoader();
-    const defs = { wood: './woodplanks.png', grass: './grass.png', fabric: './fabric.png' };
+    const defs = { wood: './woodplanks.png', grass: './grass.png', fabric: './fabric.png', water: './watertexture.png', metal: './diamondplate.png', slate: './slate.png' };
     for (const [key, path] of Object.entries(defs)) {
         const tex = loader.load(path);
         tex.wrapS = THREE.RepeatWrapping;
