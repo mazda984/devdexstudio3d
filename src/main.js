@@ -5814,6 +5814,9 @@ function updatePlaying(dt) {
     // Block-touch/tick scripts: OnTickUpdate:command? rules run on their own fixed timer
     // here (once per frame, world-level - not tied to any particular player).
     world.updateScriptTicks(dt);
+    // ifpart:touch <blockName> command? rules: checks every unanchored/moving part against
+    // its target block every frame (part-vs-part contact, not player touch).
+    world.updatePartTouchScripts();
 
     // RigBot Physics/AI: every RigBot falls with gravity like the player; ones with
     // "Attacks Player" enabled also walk toward the player while grounded.

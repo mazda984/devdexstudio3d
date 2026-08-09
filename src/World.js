@@ -238,6 +238,18 @@ export class World {
                 rules.push({ event: 'tick', command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
                 continue;
             }
+
+            // ifpart:touch <blockName> command? args... - fires whenever any unanchored part
+            // (Anchored=false - a physically moving block, not the player) touches the named
+            // block. Unlike OnTouch (players only), this is for block-vs-block contact, e.g.
+            // "ifpart:touch zemin delete?" to despawn a falling/rolling part when it hits the
+            // ground.
+            const partTouchMatch = line.match(/^ifpart:touch\s+(\S+)\s+(\w+)\??\s*(.*)$/i);
+            if (partTouchMatch) {
+                const [, blockName, commandRaw, rest] = partTouchMatch;
+                rules.push({ event: 'parttouch', blockName, command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
+                continue;
+            }
         }
         return rules;
     }
@@ -304,9 +316,95 @@ export class World {
                 state.toggled = goingToColor;
                 break;
             }
+            case 'rise': {
+                // rise? <blockName> <maxSteps> [<stepSize>] - moves the named block up by
+                // <stepSize> studs (default 1) every tick (~1.4s), for <maxSteps> ticks
+                // (e.g. 120 ticks). Once it's risen <maxSteps> times, it snaps straight back
+                // down to its original starting height and the whole climb starts over -
+                // e.g. for rising/resetting lava, water, a platform, etc.
+                const [blockName, maxStepsArg, stepArg] = rule.args;
+                const target = this.items.find(o => o.name === blockName);
+                if (!target) return;
+                const maxSteps = Math.max(1, parseInt(maxStepsArg, 10) || 1);
+                const step = stepArg !== undefined && stepArg !== '' ? parseFloat(stepArg) : 1;
+
+                if (state.baseY === undefined) state.baseY = target.position.y;
+                if (state.step === undefined) state.step = 0;
+
+                state.step++;
+                if (state.step > maxSteps) {
+                    // Completed a full climb - reset back to the start and begin rising again.
+                    state.step = 0;
+                    target.position.y = state.baseY;
+                } else {
+                    target.position.y = state.baseY + state.step * step;
+                }
+                break;
+            }
             default:
                 console.warn(`Unknown OnTickUpdate command "${rule.command}?" in rule: ${rule.raw}`);
         }
+    }
+
+    // Runs every ifpart:touch <blockName> command? rule, once per frame during gameplay:
+    // checks every unanchored (Anchored=false) part for AABB overlap against the named
+    // target block, and if it's touching, runs the rule's command against the touching
+    // part. Call this once per frame alongside updateScriptTicks(), from main.js.
+    updatePartTouchScripts() {
+        if (!this.scriptRules || this.scriptRules.length === 0) return;
+        if (!this.dynamicObjects || this.dynamicObjects.length === 0) return;
+
+        const partTouchRules = this.scriptRules.filter(r => r.event === 'parttouch');
+        if (partTouchRules.length === 0) return;
+
+        // Snapshot the moving-parts list before running any commands, since a command like
+        // "delete" removes entries from this.dynamicObjects mid-loop (see removePart()) and
+        // mutating the array we're iterating would skip/duplicate entries.
+        const movingParts = this.dynamicObjects.slice();
+
+        for (const rule of partTouchRules) {
+            const target = this.items.find(o => o.name === rule.blockName);
+            if (!target) continue;
+            const targetBox = new THREE.Box3().setFromObject(target);
+
+            for (const part of movingParts) {
+                if (part === target) continue; // a part can't touch itself
+                if (!part.parent) continue; // already removed by an earlier rule this frame
+                const partBox = new THREE.Box3().setFromObject(part);
+                if (!targetBox.intersectsBox(partBox)) continue;
+                this.runPartTouchScriptCommand(rule, part);
+            }
+        }
+    }
+
+    runPartTouchScriptCommand(rule, part) {
+        switch (rule.command) {
+            case 'delete':
+                this.removePart(part);
+                break;
+            default:
+                console.warn(`Unknown ifpart:touch command "${rule.command}" in rule: ${rule.raw}`);
+        }
+    }
+
+    // Fully removes a part spawned via createBlock/createPart from the world: takes it out
+    // of the scene graph and every bookkeeping array (items/collidables/dynamicObjects/
+    // killBricks/etc.) and frees its GPU resources, so a deleted part is really gone -
+    // not just invisible, and not still tested for future collisions/touches.
+    removePart(mesh) {
+        if (!mesh) return;
+        if (mesh.parent) mesh.parent.remove(mesh);
+
+        const arrays = [this.items, this.collidables, this.dynamicObjects, this.killBricks, this.launchPads, this.teleporters, this.finishPads];
+        for (const arr of arrays) {
+            if (!arr) continue;
+            const i = arr.indexOf(mesh);
+            if (i !== -1) arr.splice(i, 1);
+        }
+
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (Array.isArray(mesh.material)) mesh.material.forEach(m => m.dispose());
+        else if (mesh.material) mesh.material.dispose();
     }
 
     serialize() {
