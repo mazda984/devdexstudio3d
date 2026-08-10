@@ -1098,6 +1098,10 @@
                         <span>Model</span>
                     </div>
                     <input type="file" id="model-file-input" accept=".glb,.gltf" style="display:none">
+                    <div class="tool-btn" id="tool-textblock" title="Place a transparent block you can write text on">
+                        <div style="font-size: 20px;">🔤</div>
+                        <span>Text</span>
+                    </div>
                     <div class="tool-btn" id="tool-delete">
                         <div style="font-size: 24px; font-weight: bold; color: red;">X</div>
                         <span>Delete</span>
@@ -1170,6 +1174,17 @@
                         <option value="rocketlauncher">Rocket Launcher</option>
                         <option value="sword">Sword</option>
                     </select>
+                </div>
+            </div>
+            <div id="prop-section-text" style="display:none;">
+                <div class="prop-header" style="background: #eee; font-weight: normal;">Text</div>
+                <div class="prop-row" style="align-items:flex-start;">
+                    <span class="prop-label">Content</span>
+                    <textarea id="prop-text-content" class="prop-val" rows="3" style="resize:vertical; font-family:inherit;" placeholder="Type text..."></textarea>
+                </div>
+                <div class="prop-row">
+                    <span class="prop-label">Text Color</span>
+                    <input type="color" id="prop-text-color" class="prop-val" value="#000000">
                 </div>
             </div>
             <div class="prop-header" style="background: #eee; font-weight: normal;">Basic</div>

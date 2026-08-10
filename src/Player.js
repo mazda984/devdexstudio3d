@@ -1733,60 +1733,72 @@ export class Player {
     }
 
     // Depenetration: if the player's box ends up overlapping a solid block (most commonly
-    // from jumping up into the underside of a floating block, or spawning/teleporting into
-    // one), push them straight back out along whichever axis has the smallest overlap -
-    // every single frame, immediately - instead of just freezing movement and leaving them
-    // wedged there. This is what actually gets you unstuck; the 12s teleport-up further
-    // below is only a last-resort safety net for the rare case a player is fully enclosed
-    // on every side (where there's no clean "out" direction to push them along).
+    // from jumping up into the underside of a floating block, clipping into a doorway/gap,
+    // or spawning/teleporting into one), push them straight back out - every single frame,
+    // immediately - instead of just freezing movement and leaving them wedged inside it.
+    // Runs multiple passes per call: a single pass only resolves the worst overlap, which
+    // isn't enough when squeezed between TWO blocks (pushing out of one can shove you
+    // straight into the other) - iterating re-checks after each push so it keeps working
+    // through the stack until nothing overlaps anymore (or it gives up after a few tries,
+    // in which case the 12s->2s teleport safety net below is the final fallback).
     resolveOverlap(collidables) {
-        const pBox = new THREE.Box3(
-            new THREE.Vector3(this.position.x - 1.2, this.position.y + 0.6, this.position.z - 1.2),
-            new THREE.Vector3(this.position.x + 1.2, this.position.y + 5.5, this.position.z + 1.2)
-        );
+        const EPS = 0.02; // tiny extra nudge so we don't land exactly on the boundary and
+                           // immediately re-trigger next frame from floating-point rounding
+        let resolvedAny = false;
 
-        let smallestOverlap = Infinity;
-        let pushVec = null;
+        for (let iter = 0; iter < 6; iter++) {
+            const pBox = new THREE.Box3(
+                new THREE.Vector3(this.position.x - 1.2, this.position.y + 0.6, this.position.z - 1.2),
+                new THREE.Vector3(this.position.x + 1.2, this.position.y + 5.5, this.position.z + 1.2)
+            );
 
-        for (const obj of collidables) {
-            if (obj === this.mesh || obj.parent === this.mesh) continue;
-            if (Math.abs(obj.position.x - this.position.x) > 20 || Math.abs(obj.position.z - this.position.z) > 20) continue;
+            let worstOverlap = -Infinity;
+            let pushVec = null;
 
-            const oBox = new THREE.Box3().setFromObject(obj);
-            if (!pBox.intersectsBox(oBox)) continue;
+            for (const obj of collidables) {
+                if (obj === this.mesh || obj.parent === this.mesh) continue;
+                if (Math.abs(obj.position.x - this.position.x) > 20 || Math.abs(obj.position.z - this.position.z) > 20) continue;
 
-            const overlapX = Math.min(pBox.max.x, oBox.max.x) - Math.max(pBox.min.x, oBox.min.x);
-            const overlapY = Math.min(pBox.max.y, oBox.max.y) - Math.max(pBox.min.y, oBox.min.y);
-            const overlapZ = Math.min(pBox.max.z, oBox.max.z) - Math.max(pBox.min.z, oBox.min.z);
-            if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
+                const oBox = new THREE.Box3().setFromObject(obj);
+                if (!pBox.intersectsBox(oBox)) continue;
 
-            const minOverlap = Math.min(overlapX, overlapY, overlapZ);
-            if (minOverlap >= smallestOverlap) continue;
-            smallestOverlap = minOverlap;
+                const overlapX = Math.min(pBox.max.x, oBox.max.x) - Math.max(pBox.min.x, oBox.min.x);
+                const overlapY = Math.min(pBox.max.y, oBox.max.y) - Math.max(pBox.min.y, oBox.min.y);
+                const overlapZ = Math.min(pBox.max.z, oBox.max.z) - Math.max(pBox.min.z, oBox.min.z);
+                if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
 
-            if (minOverlap === overlapY) {
-                const objCenterY = (oBox.min.y + oBox.max.y) / 2;
-                const dir = (this.position.y + 2.85) < objCenterY ? -1 : 1;
-                pushVec = new THREE.Vector3(0, dir * overlapY, 0);
-            } else if (minOverlap === overlapX) {
-                const objCenterX = (oBox.min.x + oBox.max.x) / 2;
-                const dir = this.position.x < objCenterX ? -1 : 1;
-                pushVec = new THREE.Vector3(dir * overlapX, 0, 0);
-            } else {
-                const objCenterZ = (oBox.min.z + oBox.max.z) / 2;
-                const dir = this.position.z < objCenterZ ? -1 : 1;
-                pushVec = new THREE.Vector3(0, 0, dir * overlapZ);
+                // Per-object minimum-translation axis (the shortest way out of THIS object).
+                const minOverlap = Math.min(overlapX, overlapY, overlapZ);
+                // Across all currently-overlapping objects this pass, resolve whichever one
+                // we're most deeply embedded in first - the most urgent one to escape.
+                if (minOverlap <= worstOverlap) continue;
+                worstOverlap = minOverlap;
+
+                if (minOverlap === overlapY) {
+                    const objCenterY = (oBox.min.y + oBox.max.y) / 2;
+                    const dir = (this.position.y + 2.85) < objCenterY ? -1 : 1;
+                    pushVec = new THREE.Vector3(0, dir * (overlapY + EPS), 0);
+                } else if (minOverlap === overlapX) {
+                    const objCenterX = (oBox.min.x + oBox.max.x) / 2;
+                    const dir = this.position.x < objCenterX ? -1 : 1;
+                    pushVec = new THREE.Vector3(dir * (overlapX + EPS), 0, 0);
+                } else {
+                    const objCenterZ = (oBox.min.z + oBox.max.z) / 2;
+                    const dir = this.position.z < objCenterZ ? -1 : 1;
+                    pushVec = new THREE.Vector3(0, 0, dir * (overlapZ + EPS));
+                }
             }
-        }
 
-        if (pushVec) {
+            if (!pushVec) break; // nothing overlapping anymore - fully resolved
+
             this.position.add(pushVec);
             if (pushVec.y !== 0) this.velocity.y = 0;
             if (pushVec.x !== 0) this.velocity.x = 0;
             if (pushVec.z !== 0) this.velocity.z = 0;
-            return true;
+            resolvedAny = true;
         }
-        return false;
+
+        return resolvedAny;
     }
 
     checkCollision(x, y, z, collidables) {

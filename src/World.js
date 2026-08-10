@@ -279,23 +279,25 @@ export class World {
 
     // Runs every OnTickUpdate:command? rule on a fixed timer (currently every 1.4s,
     // independent of framerate). Call this once per frame during gameplay.
+    //
+    // IMPORTANT: this used to be a per-client stopwatch that started counting from 0
+    // whenever THAT client's map finished loading - so a friend joining a few seconds late
+    // saw rising lava (etc.) a few ticks behind everyone else, and it would never catch up.
+    // Instead, the "current tick number" is now derived straight from the system clock
+    // (Date.now()), which every player's device already agrees on without any network
+    // messages - so whoever asks "what tick are we on?" at the same real-world moment gets
+    // the same answer, whether they've been in the game for an hour or just joined.
     updateScriptTicks(dt) {
         if (!this.scriptRules || this.scriptRules.length === 0) return;
-        if (!this._tickState) this._tickState = {};
         const TICK_INTERVAL = 1.4;
-        this.scriptRules.forEach((rule, idx) => {
+        const tickCount = Math.floor(Date.now() / (TICK_INTERVAL * 1000));
+        this.scriptRules.forEach((rule) => {
             if (rule.event !== 'tick') return;
-            if (!this._tickState[idx]) this._tickState[idx] = { elapsed: 0, toggled: false };
-            const st = this._tickState[idx];
-            st.elapsed += dt;
-            if (st.elapsed >= TICK_INTERVAL) {
-                st.elapsed -= TICK_INTERVAL;
-                this.runTickScriptCommand(rule, st);
-            }
+            this.runTickScriptCommand(rule, tickCount);
         });
     }
 
-    runTickScriptCommand(rule, state) {
+    runTickScriptCommand(rule, tickCount) {
         switch (rule.command) {
             case 'changecolor': {
                 // changecolor? <blockName> <colorName> - blinks the named block between its
@@ -305,15 +307,17 @@ export class World {
                 const target = this.items.find(o => o.name === blockName);
                 if (!target || !target.material) return;
                 const mat0 = Array.isArray(target.material) ? target.material[0] : target.material;
-                if (state.originalColor === undefined) state.originalColor = mat0.color.getHex();
+                if (target.userData._origColor === undefined) target.userData._origColor = mat0.color.getHex();
 
-                const goingToColor = !state.toggled;
-                const applyHex = goingToColor ? World.parseColorArg(colorArg) : state.originalColor;
+                // Purely a function of the shared tick count (see updateScriptTicks above) -
+                // every client lands on the exact same on/off phase at the exact same
+                // real-world moment, regardless of when they joined.
+                const showAltColor = tickCount % 2 === 1;
+                const applyHex = showAltColor ? World.parseColorArg(colorArg) : target.userData._origColor;
                 const col = new THREE.Color(applyHex);
                 if (Array.isArray(target.material)) target.material.forEach(m => m.color.copy(col));
                 else target.material.color.copy(col);
                 if (target.userData.serial) target.userData.serial.color = applyHex;
-                state.toggled = goingToColor;
                 break;
             }
             case 'rise': {
@@ -328,17 +332,16 @@ export class World {
                 const maxSteps = Math.max(1, parseInt(maxStepsArg, 10) || 1);
                 const step = stepArg !== undefined && stepArg !== '' ? parseFloat(stepArg) : 1;
 
-                if (state.baseY === undefined) state.baseY = target.position.y;
-                if (state.step === undefined) state.step = 0;
+                // Cached once per mesh, the first time we see it - at that point every
+                // client's copy is still sitting at the map's original saved height (no
+                // client has touched it yet), so it's the same value everywhere.
+                if (target.userData._riseBaseY === undefined) target.userData._riseBaseY = target.position.y;
 
-                state.step++;
-                if (state.step > maxSteps) {
-                    // Completed a full climb - reset back to the start and begin rising again.
-                    state.step = 0;
-                    target.position.y = state.baseY;
-                } else {
-                    target.position.y = state.baseY + state.step * step;
-                }
+                // Purely a function of the shared tick count: same real-world moment ->
+                // same cycle position -> same height, for every client, whether they've been
+                // watching it rise the whole time or just walked in.
+                const cyclePos = tickCount % (maxSteps + 1); // 0..maxSteps, then wraps to 0
+                target.position.y = target.userData._riseBaseY + cyclePos * step;
                 break;
             }
             default:
@@ -438,6 +441,124 @@ export class World {
         });
 
         return bird;
+    }
+
+    // Text Block: a thin, semi-transparent "glass sign" the player can write text on (e.g.
+    // signs, labels, instructions). Text is rendered into a small canvas and used as a
+    // texture, so any font/wrap logic is plain 2D canvas drawing - no external font/label
+    // library needed. The canvas is kept on userData so updateTextBlockContent() can redraw
+    // it in place later (editing the text in Properties doesn't need to rebuild the mesh).
+    createTextBlock(x, y, z, text = 'Text', options = {}) {
+        const w = options.w || 4, h = options.h || 2, d = options.d || 0.3;
+        const textColor = options.textColor !== undefined ? options.textColor : 0x000000;
+
+        const geo = new THREE.BoxGeometry(w, h, d);
+        const canvas = document.createElement('canvas');
+        canvas.width = 512;
+        canvas.height = 256;
+
+        // The 4 "edge" faces (sides/top/bottom) just get a plain translucent glass tint...
+        const glassMat = new THREE.MeshPhysicalMaterial({
+            color: 0xbfe8ff, transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0,
+            side: THREE.DoubleSide
+        });
+        // ...while front/back get the actual text, drawn on a matching glass-tinted backdrop
+        // so the whole block reads as one consistent pane, not just two random faces.
+        const textTexture = this._drawTextTexture(canvas, text, textColor);
+        const textMat = new THREE.MeshBasicMaterial({ map: textTexture, transparent: true, side: THREE.DoubleSide });
+
+        // BoxGeometry's default face-group order is [+x, -x, +y, -y, +z, -z].
+        const mats = [glassMat, glassMat, glassMat, glassMat, textMat, textMat];
+
+        const mesh = new THREE.Mesh(geo, mats);
+        mesh.position.set(x, y, z);
+        mesh.name = 'TextBlock';
+        mesh.userData._textCanvas = canvas;
+        mesh.userData.serial = {
+            type: 'text_block', w, h, d, color: 0xbfe8ff, flags: ['static'],
+            props: { text, textColor }
+        };
+
+        this.mapGroup.add(mesh);
+        this.items.push(mesh);
+        // Solid like a normal block (you can stand on/bump into the glass), matching how a
+        // real sign or glass panel would behave.
+        this.collidables.push(mesh);
+        mesh.userData.collide = true;
+        return mesh;
+    }
+
+    // Renders `text` onto `canvas` (word-wrapped, auto-shrinking font, centered) and returns
+    // a fresh CanvasTexture. Shared by createTextBlock() and updateTextBlockContent() so
+    // both the initial build and later edits use identical layout logic.
+    _drawTextTexture(canvas, text, textColorHex) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Translucent glass-tinted backdrop matching the block's other 4 faces.
+        ctx.fillStyle = 'rgba(210, 235, 255, 0.28)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#' + new THREE.Color(textColorHex ?? 0x000000).getHexString();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const words = String(text || '').split(/\s+/).filter(Boolean);
+        const maxWidth = canvas.width - 40;
+        let fontSize = 48;
+        let lines = [];
+
+        const wrapAtCurrentSize = () => {
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            lines = [];
+            let line = '';
+            for (const word of words) {
+                const test = line ? line + ' ' + word : word;
+                if (line && ctx.measureText(test).width > maxWidth) {
+                    lines.push(line);
+                    line = word;
+                } else {
+                    line = test;
+                }
+            }
+            if (line) lines.push(line);
+        };
+        wrapAtCurrentSize();
+        // Shrink the font until every line fits vertically too, so long text degrades
+        // gracefully instead of spilling off the block.
+        while (lines.length * (fontSize * 1.2) > canvas.height - 30 && fontSize > 16) {
+            fontSize -= 4;
+            wrapAtCurrentSize();
+        }
+
+        const lineHeight = fontSize * 1.2;
+        const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+        lines.forEach((line, i) => ctx.fillText(line, canvas.width / 2, startY + i * lineHeight));
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    // Redraws a Text Block's content in place (called from the Properties panel when the
+    // text/color is edited) - reuses the same canvas + geometry, just swaps the texture, so
+    // it's cheap and doesn't disturb the block's position/selection/transform gizmo.
+    updateTextBlockContent(mesh, text, textColor) {
+        if (!mesh || !mesh.userData || !mesh.userData._textCanvas) return;
+        const resolvedColor = textColor !== undefined ? textColor : (mesh.userData.serial && mesh.userData.serial.props && mesh.userData.serial.props.textColor) || 0x000000;
+        const newTex = this._drawTextTexture(mesh.userData._textCanvas, text, resolvedColor);
+
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        mats.forEach(m => {
+            if (m.map) {
+                m.map.dispose();
+                m.map = newTex;
+                m.needsUpdate = true;
+            }
+        });
+
+        if (mesh.userData.serial) {
+            mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, { text, textColor: resolvedColor });
+        }
     }
 
     serialize() {
@@ -545,6 +666,16 @@ export class World {
                     // Can't parse GLB binary data here (needs GLTFLoader in main.js);
                     // hand it off to main.js after load, same pattern as pendingRigs.
                     this.pendingModels.push(d);
+                    placedCount++;
+                } else if (d.type === 'text_block') {
+                    const props = d.props || {};
+                    const mesh = this.createTextBlock(d.x, d.y, d.z, props.text || 'Text', {
+                        w: d.w, h: d.h, d: d.d, textColor: props.textColor
+                    });
+                    mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
+                    mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    if (d.name) mesh.name = d.name;
+                    this._applyAnchorState(mesh, d);
                     placedCount++;
                 } else if (d.type === 'weapon_pickup') {
                     this.createWeaponPickup(d.x, d.y, d.z, (d.props && d.props.weaponType) || 'rocketlauncher');

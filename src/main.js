@@ -53,8 +53,29 @@ const room = new WebsimSocket();
 // the link gets the exact bytes back out of the URL - nothing to upload, nothing that can be
 // "down", nothing that can silently fail.
 async function encodeMapForUrl(mapName, saveObj) {
-    const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: saveObj.data });
     const zip = new JSZip();
+
+    // 3D models are by far the biggest thing a map can contain (raw GLB binary, often
+    // several hundred KB+), and they used to be stuffed into the JSON as a base64 string
+    // and THEN the whole JSON got base64'd again for the URL - base64-inside-base64, plus
+    // DEFLATE compressing text-encoded binary (which compresses much worse than the actual
+    // binary bytes do). That's why big models blew straight through the URL size limit.
+    // Fix: pull each model's binary out into its own raw binary entry in the zip (so JSZip
+    // compresses the actual bytes, not a base64 rendering of them), and leave only a short
+    // reference name in the JSON. This alone cuts model overhead by roughly a third, before
+    // compression even factors in.
+    let modelIndex = 0;
+    const dataForJson = (saveObj.data || []).map(entry => {
+        if (entry && entry.type === 'model3d' && entry.props && entry.props.data) {
+            const refName = `model_${modelIndex++}`;
+            zip.file(refName, base64ToArrayBuffer(entry.props.data), { binary: true });
+            const { data, ...restProps } = entry.props;
+            return { ...entry, props: { ...restProps, dataRef: refName } };
+        }
+        return entry;
+    });
+
+    const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: dataForJson });
     zip.file('d', payload);
     // DEFLATE compression keeps the URL as short as reasonably possible.
     const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE', compressionOptions: { level: 9 } });
@@ -77,7 +98,24 @@ async function decodeMapFromUrl(encodedParam) {
     const file = zip.file('d');
     if (!file) throw new Error('Shared link data is malformed (missing inner file).');
     const text = await file.async('string');
-    return JSON.parse(text);
+    const parsed = JSON.parse(text);
+
+    // Reverse the model3d binary-entry trick above: swap each props.dataRef back into a
+    // props.data base64 string, so everything downstream (World.loadFromData/spawnModel3D)
+    // sees exactly the same shape it always has and needs no changes of its own.
+    if (parsed && Array.isArray(parsed.data)) {
+        for (const entry of parsed.data) {
+            if (entry && entry.type === 'model3d' && entry.props && entry.props.dataRef) {
+                const modelFile = zip.file(entry.props.dataRef);
+                if (modelFile) {
+                    entry.props.data = await modelFile.async('base64');
+                }
+                delete entry.props.dataRef;
+            }
+        }
+    }
+
+    return parsed;
 }
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
@@ -1355,6 +1393,8 @@ const propInputs = {
     attachRig: document.getElementById('prop-attach-rig'),
     material: document.getElementById('prop-material'),
     weaponType: document.getElementById('prop-weapon-type'),
+    textContent: document.getElementById('prop-text-content'),
+    textColor: document.getElementById('prop-text-color'),
 };
 
 // Rebuilds a part's material(s) to match the chosen named material ("plastic"/"wood"/
@@ -1457,13 +1497,25 @@ function updateStudioPropertiesUI() {
     const mat = Array.isArray(m.material) ? m.material[0] : m.material;
     if (mat && mat.color) propInputs.color.value = '#' + (mat.color ? mat.color.getHexString() : 'cccccc');
     else if (propInputs.color) propInputs.color.value = '#cccccc';
+    const isTextBlock = !!(m.userData && m.userData.serial && m.userData.serial.type === 'text_block');
     if (propInputs.material) {
         const matRow = propInputs.material.closest('.prop-row');
         // Material only applies to plain parts (block/sphere/cylinder/wedge) - RigBots/
-        // models/weapons already returned earlier above, so anything reaching here qualifies.
-        const applicable = !!(m.userData && m.userData.serial && m.userData.serial.type);
+        // models/weapons already returned earlier above, and Text Blocks have their own
+        // fixed glass material (switching it would blow away the text texture), so exclude
+        // those too.
+        const applicable = !!(m.userData && m.userData.serial && m.userData.serial.type) && !isTextBlock;
         if (matRow) matRow.style.display = applicable ? '' : 'none';
         propInputs.material.value = (m.userData && m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
+    }
+    const textSection = document.getElementById('prop-section-text');
+    if (textSection) {
+        textSection.style.display = isTextBlock ? '' : 'none';
+        if (isTextBlock) {
+            const props = m.userData.serial.props || {};
+            if (propInputs.textContent) propInputs.textContent.value = props.text || '';
+            if (propInputs.textColor) propInputs.textColor.value = '#' + new THREE.Color(props.textColor ?? 0x000000).getHexString();
+        }
     }
     // Assuming Standard Material props, though our blocks use array
     if (mat) {
@@ -1629,13 +1681,22 @@ const onPropChange = () => {
     }
 
     // Material (must run before the Colors block below so the freshly-rebuilt material
-    // still picks up whatever color is currently in the color picker).
-    if (propInputs.material) {
+    // still picks up whatever color is currently in the color picker). Skipped for Text
+    // Blocks - they keep their own fixed glass material (see createTextBlock).
+    if (propInputs.material && (!m.userData.serial || m.userData.serial.type !== 'text_block')) {
         const wantedMat = propInputs.material.value;
         const currentMat = (m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
         if (wantedMat !== currentMat) {
             applyPartMaterial(m, wantedMat);
         }
+    }
+
+    // Text Block content: redraw the canvas texture whenever the Content/Text Color fields
+    // change, so what's written in Properties is exactly what shows up on the block.
+    if (m.userData.serial && m.userData.serial.type === 'text_block' && typeof world.updateTextBlockContent === 'function') {
+        const newText = propInputs.textContent ? propInputs.textContent.value : ((m.userData.serial.props && m.userData.serial.props.text) || '');
+        const newColorHex = propInputs.textColor ? new THREE.Color(propInputs.textColor.value).getHex() : undefined;
+        world.updateTextBlockContent(m, newText, newColorHex);
     }
 
     // Colors
@@ -2335,6 +2396,15 @@ document.getElementById('tool-weapon').onclick = () => {
     updateExplorer();
 };
 
+document.getElementById('tool-textblock').onclick = () => {
+    playSwitch();
+    const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -6).applyQuaternion(camera.quaternion));
+    const textBlock = world.createTextBlock(pos.x, pos.y, pos.z, 'Text');
+    studioSelected = textBlock;
+    updateStudioSelection();
+    updateExplorer();
+};
+
 document.getElementById('tool-model').onclick = () => {
     playSwitch();
     document.getElementById('model-file-input').click();
@@ -2342,6 +2412,13 @@ document.getElementById('tool-model').onclick = () => {
 document.getElementById('model-file-input').addEventListener('change', (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
+    // Heads-up at import time rather than only discovering it when Publish fails: models
+    // are embedded directly in the shareable link (this static site has no server/database
+    // of its own to upload them to), so very large ones can still make the link too long
+    // to share even after compression.
+    if (file.size > 2 * 1024 * 1024) {
+        addChatMessage('System', `"${file.name}" is ${Math.round(file.size / 1024 / 1024 * 10) / 10}MB - large models can make the Publish link too long to share. Consider a lower-poly model or compressed textures if sharing fails.`);
+    }
     const reader = new FileReader();
     reader.onload = () => spawnModel3D(null, reader.result, file.name);
     reader.onerror = () => addChatMessage('System', `Couldn't read "${file.name}".`);
