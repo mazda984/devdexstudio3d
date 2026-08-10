@@ -1354,6 +1354,7 @@ const propInputs = {
     rigColor: document.getElementById('prop-rig-color'),
     attachRig: document.getElementById('prop-attach-rig'),
     material: document.getElementById('prop-material'),
+    weaponType: document.getElementById('prop-weapon-type'),
 };
 
 // Rebuilds a part's material(s) to match the chosen named material ("plastic"/"wood"/
@@ -1407,6 +1408,11 @@ function updateStudioPropertiesUI() {
         if (propInputs.rx) propInputs.rx.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.x));
         if (propInputs.ry) propInputs.ry.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.y));
         if (propInputs.rz) propInputs.rz.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.z));
+        if (m.userData.isWeaponPickup) {
+            const wSection = document.getElementById('prop-section-weapon');
+            if (wSection) wSection.style.display = '';
+            if (propInputs.weaponType) propInputs.weaponType.value = m.userData.weaponType || 'rocketlauncher';
+        }
         if (m.userData.isRig || m.userData.isWeaponPickup) return; // no anchor/weld UI needed for these
 
         // Imported 3D models CAN be anchored and welded to a RigBot, same as normal parts.
@@ -1425,6 +1431,8 @@ function updateStudioPropertiesUI() {
         return;
     } else if (rigSection) {
         rigSection.style.display = 'none';
+        const wSection = document.getElementById('prop-section-weapon');
+        if (wSection) wSection.style.display = 'none';
     }
     
     // SAFETY: ensure material exists before reading properties
@@ -1542,7 +1550,24 @@ const onPropChange = () => {
     );
 
     if (m.userData && m.userData.isWeaponPickup) {
-        // Just a plain Group - position/rotation (already applied above) is all that applies.
+        // Just a plain Group - position/rotation (already applied above) is all that applies,
+        // EXCEPT for the weapon Type dropdown: switching it rebuilds the pickup as a
+        // different weapon model in place (rocket launcher <-> sword), since the two use
+        // completely different geometry, not just a material/color swap.
+        if (propInputs.weaponType && propInputs.weaponType.value !== m.userData.weaponType) {
+            const newType = propInputs.weaponType.value;
+            const pos = m.position.clone();
+            const rot = m.rotation.clone();
+            const name = m.name;
+            world.removePart(m);
+            const newPickup = world.createWeaponPickup(pos.x, pos.y, pos.z, newType);
+            newPickup.rotation.copy(rot);
+            if (name) newPickup.name = name;
+            studioSelected = newPickup;
+            transformControl.detach();
+            transformControl.attach(newPickup);
+            updateExplorer();
+        }
         return;
     }
     if (m.userData && m.userData.isRig) {
@@ -2324,30 +2349,86 @@ document.getElementById('model-file-input').addEventListener('change', (e) => {
     e.target.value = ''; // allow re-selecting the same file later
 });
 
-// --- Rocket Launcher weapon: pickup/equip, firing, and explosion knockback ---
-let hasRocketLauncher = false;
+// --- Weapons: pickup/equip (persists in a 1-slot inventory HUD), firing/attacking, and
+// dealing real damage to players (local + networked) -----------------------------------
+let equippedWeapon = null; // null | 'rocketlauncher' | 'sword'
 let nearbyWeaponPickup = null;
 let lastRocketFireTime = 0;
+let lastSwordSwingTime = 0;
 const ROCKET_FIRE_COOLDOWN = 800; // ms
+const SWORD_SWING_COOLDOWN = 500; // ms
+const ROCKET_DAMAGE = 60; // at ground zero, falls off with distance like the knockback does
+const SWORD_DAMAGE = 20;
+const SWORD_RANGE = 3.2;
 const activeRockets = []; // { mesh, velocity, spawnTime }
+
+const WEAPON_INFO = {
+    rocketlauncher: { label: 'Rocket Launcher', icon: '🚀', hint: 'Press E to pick up Rocket Launcher', equippedText: 'Rocket Launcher (Click to fire)' },
+    sword: { label: 'Sword', icon: '🗡️', hint: 'Press E to pick up Sword', equippedText: 'Sword (Click to swing)' }
+};
 
 // Small on-screen hint, created once and reused (kept out of index.html since it's purely
 // a runtime prompt, not part of the game's static layout).
 const weaponHint = document.createElement('div');
 weaponHint.style.cssText = 'position:fixed; bottom:120px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.7); color:#fff; padding:6px 14px; border-radius:4px; font-size:14px; font-family:sans-serif; display:none; z-index:900; pointer-events:none;';
-weaponHint.textContent = 'Press E to pick up Rocket Launcher';
 document.body.appendChild(weaponHint);
 
+// Inventory slot: a single persistent slot showing whatever weapon is currently equipped.
+// Unlike the old plain text label, this stays on screen and visually represents "you are
+// holding this" the whole time you have it - not just a transient toast.
+const weaponInventorySlot = document.createElement('div');
+weaponInventorySlot.style.cssText = 'position:fixed; bottom:20px; right:20px; width:56px; height:56px; background:rgba(0,0,0,0.55); border:2px solid rgba(255,255,255,0.25); border-radius:8px; display:none; align-items:center; justify-content:center; flex-direction:column; z-index:900; pointer-events:none; font-family:sans-serif;';
+weaponInventorySlot.innerHTML = '<div id="weapon-slot-icon" style="font-size:22px; line-height:1;"></div>';
+document.body.appendChild(weaponInventorySlot);
+const weaponSlotIcon = weaponInventorySlot.querySelector('#weapon-slot-icon');
+
 const weaponEquippedLabel = document.createElement('div');
-weaponEquippedLabel.style.cssText = 'position:fixed; bottom:20px; right:20px; background:rgba(0,0,0,0.6); color:#ff6a3d; padding:6px 12px; border-radius:4px; font-size:13px; font-family:sans-serif; font-weight:bold; display:none; z-index:900; pointer-events:none;';
-weaponEquippedLabel.textContent = '🚀 Rocket Launcher (Click to fire)';
+weaponEquippedLabel.style.cssText = 'position:fixed; bottom:82px; right:20px; background:rgba(0,0,0,0.6); color:#ff6a3d; padding:6px 12px; border-radius:4px; font-size:13px; font-family:sans-serif; font-weight:bold; display:none; z-index:900; pointer-events:none; white-space:nowrap;';
 document.body.appendChild(weaponEquippedLabel);
+
+// Health bar: shows the local player's HP, updated every frame from player.health.
+// Weapons are the only thing that drain it right now (rocket splash / sword hits).
+const healthBarWrap = document.createElement('div');
+healthBarWrap.style.cssText = 'position:fixed; bottom:20px; left:20px; width:180px; height:22px; background:rgba(0,0,0,0.5); border:2px solid rgba(255,255,255,0.25); border-radius:5px; display:none; z-index:900; pointer-events:none; overflow:hidden;';
+healthBarWrap.innerHTML = '<div id="health-bar-fill" style="height:100%; width:100%; background:linear-gradient(90deg,#e74c3c,#ff6b6b); transition:width 0.15s ease;"></div>' +
+    '<div id="health-bar-text" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font:bold 12px sans-serif; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.8);"></div>';
+healthBarWrap.style.position = 'fixed';
+document.body.appendChild(healthBarWrap);
+const healthBarFill = healthBarWrap.querySelector('#health-bar-fill');
+const healthBarText = healthBarWrap.querySelector('#health-bar-text');
+
+// Updates the HP bar from player.health, called every frame during PLAYING/TEST.
+function updateHealthHUD() {
+    const show = (gameState === 'PLAYING' || gameState === 'TEST') && !player.isDead;
+    healthBarWrap.style.display = show ? 'block' : 'none';
+    if (!show) return;
+    const pct = Math.max(0, Math.min(100, (player.health / player.maxHealth) * 100));
+    healthBarFill.style.width = pct + '%';
+    healthBarText.textContent = `${Math.ceil(player.health)} / ${player.maxHealth}`;
+}
+
+// Deals damage to whoever is at `targetId` (a room clientId): applies it directly if that's
+// us, otherwise sends a network message so the actual owner of that player applies it to
+// their own health (client-authoritative: the attacker decides a hit landed, the victim's
+// own client is what actually reduces their HP and ragdolls them).
+function dealDamageToClient(targetId, amount) {
+    if (!targetId) return;
+    if (room && targetId === room.clientId) {
+        player.takeDamage(amount);
+        return;
+    }
+    try {
+        room.send({ type: 'weapon_hit', targetId, damage: amount });
+    } catch (e) {}
+}
 
 // Explosion knockback: any Anchored=false part/model within `radius` of `center` gets
 // launched away, harder the closer it was to the blast. This is the whole point of the
 // Anchored system paying off - anchored blocks are unaffected and don't move, exactly
 // like blast physics in Roblox-style games.
-function explodeAt(center, radius = 14, force = 55) {
+// Also deals real damage: anyone (local player or a remote player) standing within
+// `radius` takes damage that falls off with distance, same curve as the knockback.
+function explodeAt(center, radius = 14, force = 55, damage = 0) {
     if (world.dynamicObjects) {
         world.dynamicObjects.forEach(part => {
             const objCenter = new THREE.Box3().setFromObject(part).getCenter(new THREE.Vector3());
@@ -2366,6 +2447,28 @@ function explodeAt(center, radius = 14, force = 55) {
             }
         });
     }
+
+    if (damage > 0) {
+        // Local player (skip if we're the one who fired it and it hit exactly where we
+        // are... normal splash range makes self-damage possible, matching most shooters).
+        const localDist = player.mesh.position.distanceTo(center);
+        if (localDist < radius && !player.isDead) {
+            const dmg = damage * (1 - localDist / radius);
+            if (dmg > 0.5) player.takeDamage(dmg);
+        }
+        // Remote players: we (the one who fired) decide the hit and tell their owning
+        // client to apply it - see dealDamageToClient().
+        for (const id in remotePlayers) {
+            const rp = remotePlayers[id];
+            if (!rp || !rp.mesh) continue;
+            const dist = rp.mesh.position.distanceTo(center);
+            if (dist < radius) {
+                const dmg = damage * (1 - dist / radius);
+                if (dmg > 0.5) dealDamageToClient(id, dmg);
+            }
+        }
+    }
+
     spawnExplosionVFX(center);
 }
 
@@ -2424,7 +2527,7 @@ function updateRockets(dt) {
         const timedOut = performance.now() - r.spawnTime > 4000; // 4s max lifetime
         if ((hits.length > 0 && hits[0].distance <= moveDist) || timedOut) {
             const hitPoint = (hits.length > 0) ? hits[0].point : r.mesh.position.clone();
-            explodeAt(hitPoint, 14, 55);
+            explodeAt(hitPoint, 14, 55, ROCKET_DAMAGE);
             scene.remove(r.mesh);
             r.mesh.geometry.dispose();
             r.mesh.material.dispose();
@@ -2435,10 +2538,65 @@ function updateRockets(dt) {
     }
 }
 
+// Sword melee: a short-range hit-check directly in front of the camera, on click while a
+// Sword is equipped. Unlike the rocket, there's no projectile to track - it's an instant
+// "is anyone within SWORD_RANGE and roughly in front of me" check the moment you swing.
+function swingSword() {
+    const now = performance.now();
+    if (now - lastSwordSwingTime < SWORD_SWING_COOLDOWN) return;
+    lastSwordSwingTime = now;
+
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    dir.y = 0;
+    if (dir.lengthSq() > 0.0001) dir.normalize();
+
+    let hitSomeone = false;
+    for (const id in remotePlayers) {
+        const rp = remotePlayers[id];
+        if (!rp || !rp.mesh) continue;
+        const toTarget = new THREE.Vector3().subVectors(rp.mesh.position, player.mesh.position);
+        const dist = toTarget.length();
+        if (dist > SWORD_RANGE) continue;
+        toTarget.y = 0;
+        if (toTarget.lengthSq() > 0.0001) {
+            toTarget.normalize();
+            // Roughly in front of us (within ~60 degrees of where we're looking).
+            if (dir.dot(toTarget) < 0.5) continue;
+        }
+        dealDamageToClient(id, SWORD_DAMAGE);
+        hitSomeone = true;
+    }
+
+    // Simple swing feedback: a brief arc-flash in front of the player so a hit/miss both
+    // feel like something happened, without needing a full arm-swing animation rig.
+    const swingMesh = new THREE.Mesh(
+        new THREE.RingGeometry(0.9, 1.15, 12, 1, 0, Math.PI * 0.7),
+        new THREE.MeshBasicMaterial({ color: hitSomeone ? 0xff3b3b : 0xdddddd, transparent: true, opacity: 0.8, side: THREE.DoubleSide })
+    );
+    const swingStart = camera.position.clone().addScaledVector(dir, 1.4);
+    swingMesh.position.copy(swingStart);
+    swingMesh.lookAt(camera.position);
+    scene.add(swingMesh);
+    const swingStartTime = performance.now();
+    const animSwing = () => {
+        const t = (performance.now() - swingStartTime) / 180;
+        if (t >= 1) { scene.remove(swingMesh); swingMesh.geometry.dispose(); swingMesh.material.dispose(); return; }
+        swingMesh.rotation.z = t * Math.PI * 0.6;
+        swingMesh.material.opacity = 0.8 * (1 - t);
+        requestAnimationFrame(animSwing);
+    };
+    animSwing();
+    playSwitch();
+}
+
 // Called every frame from updatePlaying(): pickup proximity check ('E' to equip) + firing input.
 function updateWeaponSystem(dt) {
-    // Proximity check for un-equipped pickups
-    if (!hasRocketLauncher) {
+    // Proximity check for un-equipped pickups. Only one weapon slot exists (matching the
+    // single inventory HUD slot), so nothing new can be picked up while already holding one -
+    // this is also what makes the equipped weapon "stay" as requested: nothing ever silently
+    // swaps it out or drops it, it just stays equipped until the session ends.
+    if (!equippedWeapon) {
         let closest = null, closestDist = 3.5; // pickup radius
         world.items.forEach(o => {
             if (o.userData && o.userData.isWeaponPickup && !o.userData.collected) {
@@ -2447,15 +2605,25 @@ function updateWeaponSystem(dt) {
             }
         });
         nearbyWeaponPickup = closest;
+        const info = closest ? (WEAPON_INFO[closest.userData.weaponType] || WEAPON_INFO.rocketlauncher) : null;
+        weaponHint.textContent = info ? info.hint : '';
         weaponHint.style.display = closest ? 'block' : 'none';
 
         if (closest && input.keys.e && !weaponSystemState.eWasDown) {
-            hasRocketLauncher = true;
-            closest.visible = false;
-            closest.userData.collected = true;
+            const weaponType = closest.userData.weaponType || 'rocketlauncher';
+            equippedWeapon = weaponType;
+            // Deliberately NOT hiding/marking the pickup as collected: it stays right there in
+            // the world afterward, exactly like a weapon rack/spawner, so anyone else (or you,
+            // next time you die and lose your equip) can walk up and grab one from the same
+            // spot too - it's not a one-time pickup that disappears.
             weaponHint.style.display = 'none';
+
+            const eqInfo = WEAPON_INFO[weaponType] || WEAPON_INFO.rocketlauncher;
+            weaponSlotIcon.textContent = eqInfo.icon;
+            weaponInventorySlot.style.display = 'flex';
+            weaponEquippedLabel.textContent = eqInfo.icon + ' ' + eqInfo.equippedText;
             weaponEquippedLabel.style.display = 'block';
-            addChatMessage('System', 'Equipped Rocket Launcher! Click to fire.');
+            addChatMessage('System', `Equipped ${eqInfo.label}! Click to ${weaponType === 'sword' ? 'swing' : 'fire'}.`);
         }
     }
     weaponSystemState.eWasDown = !!input.keys.e;
@@ -2467,10 +2635,11 @@ const weaponSystemState = { eWasDown: false };
 // Clears all weapon state - called whenever a PLAYING/TEST session starts or stops, so
 // nothing lingers (equipped weapon, in-flight rockets, HUD hints) between sessions.
 function resetWeaponState() {
-    hasRocketLauncher = false;
+    equippedWeapon = null;
     nearbyWeaponPickup = null;
     weaponHint.style.display = 'none';
     weaponEquippedLabel.style.display = 'none';
+    weaponInventorySlot.style.display = 'none';
     // Bring back any pickup that was collected this session, exactly where it was placed.
     world.items.forEach(o => {
         if (o.userData && o.userData.isWeaponPickup && o.userData.collected) {
@@ -2487,14 +2656,16 @@ function resetWeaponState() {
 }
 
 
-// Firing input: left-click while equipped (only once pointer is locked, so this doesn't
-// hijack the very first click that requests pointer lock).
+// Firing/attack input: left-click while equipped (only once pointer is locked, so this
+// doesn't hijack the very first click that requests pointer lock). Branches by weapon type -
+// a Rocket Launcher fires a projectile, a Sword does an instant close-range hit-check.
 window.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
     if (!document.pointerLockElement) return;
-    if (!hasRocketLauncher) return;
-    fireRocket();
+    if (!equippedWeapon) return;
+    if (equippedWeapon === 'sword') swingSword();
+    else fireRocket();
 });
 
 
@@ -3307,6 +3478,16 @@ room.onmessage = (evt) => {
     try {
         const data = evt.data;
         if (!data || !data.type) return;
+
+        if (data.type === 'weapon_hit') {
+            // Client-authoritative hit: the attacker's client already decided this hit
+            // landed and computed the damage - we just apply it to our own player if we're
+            // the target (never trust/apply damage aimed at someone else).
+            if (data.targetId === room.clientId && typeof player !== 'undefined') {
+                player.takeDamage(data.damage || 0);
+            }
+            return;
+        }
 
         if (data.type === 'donate_robux') {
             const fromName = evt.username || (room.peers && room.peers[evt.clientId] && room.peers[evt.clientId].username) || data.username || 'Someone';
@@ -5644,6 +5825,7 @@ function updatePlaying(dt) {
     if (world.mapGroup) world.mapGroup.visible = true;
     menuGroup.visible = false;
     updateWeaponSystem(dt);
+    updateHealthHUD();
     
     // POINTS: award 1 point every 10 seconds played
     playSecondsAcc += dt;

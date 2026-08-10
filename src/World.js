@@ -546,8 +546,11 @@ export class World {
                     // hand it off to main.js after load, same pattern as pendingRigs.
                     this.pendingModels.push(d);
                     placedCount++;
+                } else if (d.type === 'weapon_pickup') {
+                    this.createWeaponPickup(d.x, d.y, d.z, (d.props && d.props.weaponType) || 'rocketlauncher');
                 } else if (d.type === 'weapon_rocketlauncher') {
-                    this.createWeaponPickup(d.x, d.y, d.z);
+                    // Legacy save format from before Sword existed - always a rocket launcher.
+                    this.createWeaponPickup(d.x, d.y, d.z, 'rocketlauncher');
                     placedCount++;
                 }
             } catch (e) {
@@ -564,32 +567,66 @@ export class World {
         }
     }
 
-    // Builds a simple rocket-launcher pickup: a small stand-alone gun model the player can
-    // walk up to and press E to equip in-game. No external assets needed (plain primitives),
-    // so - unlike RigBots/3D models - it can be fully reconstructed right here on load.
-    createWeaponPickup(x, y, z) {
+    // Builds a weapon pickup: a small stand-alone model the player can walk up to and press
+    // E to equip in-game. No external assets needed (plain primitives), so - unlike
+    // RigBots/3D models - it can be fully reconstructed right here on load. weaponType picks
+    // which model/behavior it is; more can be added here later without touching save/load,
+    // since they all share the same generic 'weapon_pickup' serialized type + props.weaponType.
+    createWeaponPickup(x, y, z, weaponType = 'rocketlauncher') {
         const group = new THREE.Group();
-        const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
-        const tubeMat = new THREE.MeshLambertMaterial({ color: 0x585858 });
 
-        const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.6, 10), tubeMat);
-        tube.rotation.z = Math.PI / 2;
-        group.add(tube);
+        if (weaponType === 'sword') {
+            const bladeMat = new THREE.MeshStandardMaterial({ color: 0xd8d8d8, metalness: 0.7, roughness: 0.25 });
+            const hiltMat = new THREE.MeshStandardMaterial({ color: 0x4a2e14, roughness: 0.8 });
+            const guardMat = new THREE.MeshStandardMaterial({ color: 0xc9a227, metalness: 0.6, roughness: 0.4 });
 
-        const grip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), bodyMat);
-        grip.position.set(-0.45, -0.35, 0);
-        group.add(grip);
+            const blade = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.035), bladeMat);
+            blade.position.set(0, 0.75, 0);
+            group.add(blade);
 
-        const sight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), bodyMat);
-        sight.position.set(0.35, 0.26, 0);
-        group.add(sight);
+            const tip = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.22, 4), bladeMat);
+            tip.position.set(0, 1.41, 0);
+            tip.rotation.y = Math.PI / 4;
+            group.add(tip);
+
+            const guard = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.08, 0.08), guardMat);
+            guard.position.set(0, 0.15, 0);
+            group.add(guard);
+
+            const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.35, 8), hiltMat);
+            grip.position.set(0, -0.05, 0);
+            group.add(grip);
+
+            const pommel = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), guardMat);
+            pommel.position.set(0, -0.24, 0);
+            group.add(pommel);
+
+            group.name = 'Sword';
+        } else {
+            weaponType = 'rocketlauncher';
+            const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
+            const tubeMat = new THREE.MeshLambertMaterial({ color: 0x585858 });
+
+            const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.6, 10), tubeMat);
+            tube.rotation.z = Math.PI / 2;
+            group.add(tube);
+
+            const grip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), bodyMat);
+            grip.position.set(-0.45, -0.35, 0);
+            group.add(grip);
+
+            const sight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), bodyMat);
+            sight.position.set(0.35, 0.26, 0);
+            group.add(sight);
+
+            group.name = 'RocketLauncher';
+        }
 
         group.position.set(x || 0, y || 0, z || 0);
-        group.name = 'RocketLauncher';
         group.userData = {
             isWeaponPickup: true,
-            weaponType: 'rocketlauncher',
-            serial: { type: 'weapon_rocketlauncher', w: 1, h: 1, d: 1, color: 0x2b2b2b, flags: [], props: {} }
+            weaponType,
+            serial: { type: 'weapon_pickup', w: 1, h: 1, d: 1, color: 0x2b2b2b, flags: [], props: { weaponType } }
         };
 
         // Not passed through addToWorld()'s 'static' flag on purpose - a pickup shouldn't

@@ -292,6 +292,11 @@ export class Player {
         this.debris = [];
         this.respawnTimer = 0;
 
+        // Health: weapons (rocket splash damage, sword hits) reduce this; hitting 0 triggers
+        // the same ragdoll/respawn flow as a kill brick (see takeDamage()/fallApart()).
+        this.maxHealth = 100;
+        this.health = this.maxHealth;
+
         // Debug/Dev
         this.forcedAnim = null;
 
@@ -991,6 +996,19 @@ export class Player {
         }
     }
 
+    // Reduces health by `amount` (weapon hits) and ragdolls/respawns the player once it
+    // reaches 0, exactly like touching a kill brick. Safe to call while already dead/mid-
+    // respawn (no-ops). Returns true if this hit was the killing blow.
+    takeDamage(amount) {
+        if (this.isDead || amount <= 0) return false;
+        this.health = Math.max(0, this.health - amount);
+        if (this.health <= 0) {
+            this.fallApart();
+            return true;
+        }
+        return false;
+    }
+
     fallApart() {
         this.stopDance();
         if (this.isDead) return;
@@ -1048,6 +1066,7 @@ export class Player {
         this.stopDance();
         this.isDead = false;
         this.mesh.visible = true;
+        this.health = this.maxHealth;
         
         // Clear stumble state on respawn
         this.stumbleTimer = 0;
