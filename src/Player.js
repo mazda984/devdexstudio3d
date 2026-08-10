@@ -1478,10 +1478,19 @@ export class Player {
         // Visuals
         this.mesh.position.copy(this.position);
 
-        // Stuck detection: if we are inside a part for more than 12 seconds, teleport up
+        // Push the player straight back out of any block they're overlapping (see
+        // resolveOverlap() above) - runs every frame, so a jump that clips into a block's
+        // underside gets corrected immediately instead of leaving them wedged inside it.
+        if (!this.isDead && !this.vehicle) {
+            this.resolveOverlap(collidables);
+            this.mesh.position.copy(this.position);
+        }
+
+        // Stuck detection: last-resort safety net for the rare case resolveOverlap() can't
+        // find a clean way out (e.g. fully enclosed on every side) - teleport up and out.
         if (!this.isDead && !this.vehicle && this.checkCollision(this.position.x, this.position.y, this.position.z, collidables)) {
             this.stuckTimer += dt;
-            if (this.stuckTimer >= 12) {
+            if (this.stuckTimer >= 2) {
                 this.teleport(this.position.clone().add(new THREE.Vector3(0, 15, 0)));
                 this.stuckTimer = 0;
                 this.chat("Unstuck!");
@@ -1721,6 +1730,63 @@ export class Player {
                 this._hatBillboardPlane.quaternion.copy(parentWorldQuat.clone().invert().multiply(camera.quaternion.clone()));
             }
         }
+    }
+
+    // Depenetration: if the player's box ends up overlapping a solid block (most commonly
+    // from jumping up into the underside of a floating block, or spawning/teleporting into
+    // one), push them straight back out along whichever axis has the smallest overlap -
+    // every single frame, immediately - instead of just freezing movement and leaving them
+    // wedged there. This is what actually gets you unstuck; the 12s teleport-up further
+    // below is only a last-resort safety net for the rare case a player is fully enclosed
+    // on every side (where there's no clean "out" direction to push them along).
+    resolveOverlap(collidables) {
+        const pBox = new THREE.Box3(
+            new THREE.Vector3(this.position.x - 1.2, this.position.y + 0.6, this.position.z - 1.2),
+            new THREE.Vector3(this.position.x + 1.2, this.position.y + 5.5, this.position.z + 1.2)
+        );
+
+        let smallestOverlap = Infinity;
+        let pushVec = null;
+
+        for (const obj of collidables) {
+            if (obj === this.mesh || obj.parent === this.mesh) continue;
+            if (Math.abs(obj.position.x - this.position.x) > 20 || Math.abs(obj.position.z - this.position.z) > 20) continue;
+
+            const oBox = new THREE.Box3().setFromObject(obj);
+            if (!pBox.intersectsBox(oBox)) continue;
+
+            const overlapX = Math.min(pBox.max.x, oBox.max.x) - Math.max(pBox.min.x, oBox.min.x);
+            const overlapY = Math.min(pBox.max.y, oBox.max.y) - Math.max(pBox.min.y, oBox.min.y);
+            const overlapZ = Math.min(pBox.max.z, oBox.max.z) - Math.max(pBox.min.z, oBox.min.z);
+            if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
+
+            const minOverlap = Math.min(overlapX, overlapY, overlapZ);
+            if (minOverlap >= smallestOverlap) continue;
+            smallestOverlap = minOverlap;
+
+            if (minOverlap === overlapY) {
+                const objCenterY = (oBox.min.y + oBox.max.y) / 2;
+                const dir = (this.position.y + 2.85) < objCenterY ? -1 : 1;
+                pushVec = new THREE.Vector3(0, dir * overlapY, 0);
+            } else if (minOverlap === overlapX) {
+                const objCenterX = (oBox.min.x + oBox.max.x) / 2;
+                const dir = this.position.x < objCenterX ? -1 : 1;
+                pushVec = new THREE.Vector3(dir * overlapX, 0, 0);
+            } else {
+                const objCenterZ = (oBox.min.z + oBox.max.z) / 2;
+                const dir = this.position.z < objCenterZ ? -1 : 1;
+                pushVec = new THREE.Vector3(0, 0, dir * overlapZ);
+            }
+        }
+
+        if (pushVec) {
+            this.position.add(pushVec);
+            if (pushVec.y !== 0) this.velocity.y = 0;
+            if (pushVec.x !== 0) this.velocity.x = 0;
+            if (pushVec.z !== 0) this.velocity.z = 0;
+            return true;
+        }
+        return false;
     }
 
     checkCollision(x, y, z, collidables) {
