@@ -9,8 +9,42 @@
     // removed: const heavyAnimatedDefinitions = {}
 */
 import * as THREE from 'three';
-import { boxUnwrapUVs, surfaceManager } from './utils.js';
+import { boxUnwrapUVs, surfaceManager, materialTextures } from './utils.js';
 import { Vehicle } from './Vehicle.js';
+
+// Per-named-material physical tweaks layered on top of the base color+texture, so e.g.
+// water actually looks/feels wet (translucent, low roughness) instead of just being a
+// blue-tinted matte cube, and metal has some shine. Anything not listed here just uses
+// the plain default (opaque, roughness 0.9, matches the old wood/grass/fabric behavior).
+const MATERIAL_PROPS = {
+    water: { transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.05 },
+    metal: { roughness: 0.35, metalness: 0.6 },
+    slate: { roughness: 0.95, metalness: 0 }
+};
+
+// Builds the material(s) for a block/part given a color and an optional named material
+// ("wood" | "grass" | "fabric" | "water" | "metal" | "slate"). Falls back to the classic
+// Plastic studs/inlet look when materialKey is missing/"plastic"/unrecognized. Shared by
+// createBlock/createPart here and by main.js's Properties-panel material switcher
+// (applyPartMaterial), so both places stay in sync automatically.
+export function buildPartMaterials(materialKey, color, isBlock) {
+    const col = new THREE.Color(color);
+    const tex = materialKey && materialKey !== 'plastic' ? materialTextures[materialKey] : null;
+
+    if (tex) {
+        const extra = MATERIAL_PROPS[materialKey] || {};
+        const mat = new THREE.MeshStandardMaterial({ map: tex, color: col, roughness: 0.9, ...extra });
+        return isBlock ? [mat, mat, mat, mat, mat, mat] : mat;
+    }
+
+    if (isBlock) {
+        const studMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.studs, color: col });
+        const inletMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.inlet, color: col });
+        const sideMat = new THREE.MeshStandardMaterial({ color: col });
+        return [sideMat, sideMat, studMat, inletMat, sideMat, sideMat];
+    }
+    return new THREE.MeshStandardMaterial({ map: surfaceManager.textures.studs, color: col, roughness: 0.5 });
+}
 
 export class World {
     constructor(scene) {
@@ -204,6 +238,18 @@ export class World {
                 rules.push({ event: 'tick', command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
                 continue;
             }
+
+            // ifpart:touch <blockName> command? args... - fires whenever any unanchored part
+            // (Anchored=false - a physically moving block, not the player) touches the named
+            // block. Unlike OnTouch (players only), this is for block-vs-block contact, e.g.
+            // "ifpart:touch zemin delete?" to despawn a falling/rolling part when it hits the
+            // ground.
+            const partTouchMatch = line.match(/^ifpart:touch\s+(\S+)\s+(\w+)\??\s*(.*)$/i);
+            if (partTouchMatch) {
+                const [, blockName, commandRaw, rest] = partTouchMatch;
+                rules.push({ event: 'parttouch', blockName, command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
+                continue;
+            }
         }
         return rules;
     }
@@ -233,23 +279,25 @@ export class World {
 
     // Runs every OnTickUpdate:command? rule on a fixed timer (currently every 1.4s,
     // independent of framerate). Call this once per frame during gameplay.
+    //
+    // IMPORTANT: this used to be a per-client stopwatch that started counting from 0
+    // whenever THAT client's map finished loading - so a friend joining a few seconds late
+    // saw rising lava (etc.) a few ticks behind everyone else, and it would never catch up.
+    // Instead, the "current tick number" is now derived straight from the system clock
+    // (Date.now()), which every player's device already agrees on without any network
+    // messages - so whoever asks "what tick are we on?" at the same real-world moment gets
+    // the same answer, whether they've been in the game for an hour or just joined.
     updateScriptTicks(dt) {
         if (!this.scriptRules || this.scriptRules.length === 0) return;
-        if (!this._tickState) this._tickState = {};
         const TICK_INTERVAL = 1.4;
-        this.scriptRules.forEach((rule, idx) => {
+        const tickCount = Math.floor(Date.now() / (TICK_INTERVAL * 1000));
+        this.scriptRules.forEach((rule) => {
             if (rule.event !== 'tick') return;
-            if (!this._tickState[idx]) this._tickState[idx] = { elapsed: 0, toggled: false };
-            const st = this._tickState[idx];
-            st.elapsed += dt;
-            if (st.elapsed >= TICK_INTERVAL) {
-                st.elapsed -= TICK_INTERVAL;
-                this.runTickScriptCommand(rule, st);
-            }
+            this.runTickScriptCommand(rule, tickCount);
         });
     }
 
-    runTickScriptCommand(rule, state) {
+    runTickScriptCommand(rule, tickCount) {
         switch (rule.command) {
             case 'changecolor': {
                 // changecolor? <blockName> <colorName> - blinks the named block between its
@@ -259,19 +307,257 @@ export class World {
                 const target = this.items.find(o => o.name === blockName);
                 if (!target || !target.material) return;
                 const mat0 = Array.isArray(target.material) ? target.material[0] : target.material;
-                if (state.originalColor === undefined) state.originalColor = mat0.color.getHex();
+                if (target.userData._origColor === undefined) target.userData._origColor = mat0.color.getHex();
 
-                const goingToColor = !state.toggled;
-                const applyHex = goingToColor ? World.parseColorArg(colorArg) : state.originalColor;
+                // Purely a function of the shared tick count (see updateScriptTicks above) -
+                // every client lands on the exact same on/off phase at the exact same
+                // real-world moment, regardless of when they joined.
+                const showAltColor = tickCount % 2 === 1;
+                const applyHex = showAltColor ? World.parseColorArg(colorArg) : target.userData._origColor;
                 const col = new THREE.Color(applyHex);
                 if (Array.isArray(target.material)) target.material.forEach(m => m.color.copy(col));
                 else target.material.color.copy(col);
                 if (target.userData.serial) target.userData.serial.color = applyHex;
-                state.toggled = goingToColor;
+                break;
+            }
+            case 'rise': {
+                // rise? <blockName> <maxSteps> [<stepSize>] - moves the named block up by
+                // <stepSize> studs (default 1) every tick (~1.4s), for <maxSteps> ticks
+                // (e.g. 120 ticks). Once it's risen <maxSteps> times, it snaps straight back
+                // down to its original starting height and the whole climb starts over -
+                // e.g. for rising/resetting lava, water, a platform, etc.
+                const [blockName, maxStepsArg, stepArg] = rule.args;
+                const target = this.items.find(o => o.name === blockName);
+                if (!target) return;
+                const maxSteps = Math.max(1, parseInt(maxStepsArg, 10) || 1);
+                const step = stepArg !== undefined && stepArg !== '' ? parseFloat(stepArg) : 1;
+
+                // Cached once per mesh, the first time we see it - at that point every
+                // client's copy is still sitting at the map's original saved height (no
+                // client has touched it yet), so it's the same value everywhere.
+                if (target.userData._riseBaseY === undefined) target.userData._riseBaseY = target.position.y;
+
+                // Purely a function of the shared tick count: same real-world moment ->
+                // same cycle position -> same height, for every client, whether they've been
+                // watching it rise the whole time or just walked in.
+                const cyclePos = tickCount % (maxSteps + 1); // 0..maxSteps, then wraps to 0
+                target.position.y = target.userData._riseBaseY + cyclePos * step;
                 break;
             }
             default:
                 console.warn(`Unknown OnTickUpdate command "${rule.command}?" in rule: ${rule.raw}`);
+        }
+    }
+
+    // Runs every ifpart:touch <blockName> command? rule, once per frame during gameplay:
+    // checks every unanchored (Anchored=false) part for AABB overlap against the named
+    // target block, and if it's touching, runs the rule's command against the touching
+    // part. Call this once per frame alongside updateScriptTicks(), from main.js.
+    updatePartTouchScripts() {
+        if (!this.scriptRules || this.scriptRules.length === 0) return;
+        if (!this.dynamicObjects || this.dynamicObjects.length === 0) return;
+
+        const partTouchRules = this.scriptRules.filter(r => r.event === 'parttouch');
+        if (partTouchRules.length === 0) return;
+
+        // Snapshot the moving-parts list before running any commands, since a command like
+        // "delete" removes entries from this.dynamicObjects mid-loop (see removePart()) and
+        // mutating the array we're iterating would skip/duplicate entries.
+        const movingParts = this.dynamicObjects.slice();
+
+        for (const rule of partTouchRules) {
+            const target = this.items.find(o => o.name === rule.blockName);
+            if (!target) continue;
+            const targetBox = new THREE.Box3().setFromObject(target);
+
+            for (const part of movingParts) {
+                if (part === target) continue; // a part can't touch itself
+                if (!part.parent) continue; // already removed by an earlier rule this frame
+                const partBox = new THREE.Box3().setFromObject(part);
+                if (!targetBox.intersectsBox(partBox)) continue;
+                this.runPartTouchScriptCommand(rule, part);
+            }
+        }
+    }
+
+    runPartTouchScriptCommand(rule, part) {
+        switch (rule.command) {
+            case 'delete':
+                this.removePart(part);
+                break;
+            default:
+                console.warn(`Unknown ifpart:touch command "${rule.command}" in rule: ${rule.raw}`);
+        }
+    }
+
+    // Fully removes a part spawned via createBlock/createPart from the world: takes it out
+    // of the scene graph and every bookkeeping array (items/collidables/dynamicObjects/
+    // killBricks/etc.) and frees its GPU resources, so a deleted part is really gone -
+    // not just invisible, and not still tested for future collisions/touches.
+    removePart(mesh) {
+        if (!mesh) return;
+        if (mesh.parent) mesh.parent.remove(mesh);
+
+        const arrays = [this.items, this.collidables, this.dynamicObjects, this.killBricks, this.launchPads, this.teleporters, this.finishPads];
+        for (const arr of arrays) {
+            if (!arr) continue;
+            const i = arr.indexOf(mesh);
+            if (i !== -1) arr.splice(i, 1);
+        }
+
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (Array.isArray(mesh.material)) mesh.material.forEach(m => m.dispose());
+        else if (mesh.material) mesh.material.dispose();
+    }
+
+    // Bird: simple decorative prop that bobs/drifts in place (spawned via the Studio
+    // toolbox's "Bird" button). Lives here (rather than inline in main.js) so the exact
+    // same construction code runs both when you place one AND when a saved/published map
+    // is reloaded - previously it was only ever built in main.js's click handler with no
+    // userData.serial, so World.serialize() silently skipped it and it vanished from any
+    // saved/published game.
+    createBird(x, y, z) {
+        const birdGeom = new THREE.BoxGeometry(1, 0.6, 0.6);
+        boxUnwrapUVs(birdGeom);
+        const birdMat = new THREE.MeshStandardMaterial({ color: 0xffcc00 });
+        const bird = new THREE.Mesh(birdGeom, birdMat);
+        bird.position.set(x, y, z);
+        bird.name = 'Bird';
+        bird.userData._bird = { time: 0, speed: 1 + Math.random(), baseY: y };
+        bird.userData.serial = { type: 'bird', w: 1, h: 0.6, d: 0.6, color: 0xffcc00, flags: ['static'], props: {} };
+
+        this.mapGroup.add(bird);
+        this.items.push(bird);
+
+        this.animated.push({
+            mesh: bird,
+            time: 0,
+            update: (dt, obj) => {
+                obj.time += dt * obj.mesh.userData._bird.speed;
+                obj.mesh.position.x += Math.cos(obj.time) * 0.02 * 10 * dt * 60;
+                obj.mesh.position.y = obj.mesh.userData._bird.baseY + Math.sin(obj.time * 2) * 0.8;
+                obj.mesh.rotation.y = Math.sin(obj.time) * 0.3;
+            }
+        });
+
+        return bird;
+    }
+
+    // Text Block: a thin, semi-transparent "glass sign" the player can write text on (e.g.
+    // signs, labels, instructions). Text is rendered into a small canvas and used as a
+    // texture, so any font/wrap logic is plain 2D canvas drawing - no external font/label
+    // library needed. The canvas is kept on userData so updateTextBlockContent() can redraw
+    // it in place later (editing the text in Properties doesn't need to rebuild the mesh).
+    createTextBlock(x, y, z, text = 'Text', options = {}) {
+        const w = options.w || 4, h = options.h || 2, d = options.d || 0.3;
+        const textColor = options.textColor !== undefined ? options.textColor : 0x000000;
+
+        const geo = new THREE.BoxGeometry(w, h, d);
+        const canvas = document.createElement('canvas');
+        canvas.width = 512;
+        canvas.height = 256;
+
+        // The 4 "edge" faces (sides/top/bottom) just get a plain translucent glass tint...
+        const glassMat = new THREE.MeshPhysicalMaterial({
+            color: 0xbfe8ff, transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0,
+            side: THREE.DoubleSide
+        });
+        // ...while front/back get the actual text, drawn on a matching glass-tinted backdrop
+        // so the whole block reads as one consistent pane, not just two random faces.
+        const textTexture = this._drawTextTexture(canvas, text, textColor);
+        const textMat = new THREE.MeshBasicMaterial({ map: textTexture, transparent: true, side: THREE.DoubleSide });
+
+        // BoxGeometry's default face-group order is [+x, -x, +y, -y, +z, -z].
+        const mats = [glassMat, glassMat, glassMat, glassMat, textMat, textMat];
+
+        const mesh = new THREE.Mesh(geo, mats);
+        mesh.position.set(x, y, z);
+        mesh.name = 'TextBlock';
+        mesh.userData._textCanvas = canvas;
+        mesh.userData.serial = {
+            type: 'text_block', w, h, d, color: 0xbfe8ff, flags: ['static'],
+            props: { text, textColor }
+        };
+
+        this.mapGroup.add(mesh);
+        this.items.push(mesh);
+        // Solid like a normal block (you can stand on/bump into the glass), matching how a
+        // real sign or glass panel would behave.
+        this.collidables.push(mesh);
+        mesh.userData.collide = true;
+        return mesh;
+    }
+
+    // Renders `text` onto `canvas` (word-wrapped, auto-shrinking font, centered) and returns
+    // a fresh CanvasTexture. Shared by createTextBlock() and updateTextBlockContent() so
+    // both the initial build and later edits use identical layout logic.
+    _drawTextTexture(canvas, text, textColorHex) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Translucent glass-tinted backdrop matching the block's other 4 faces.
+        ctx.fillStyle = 'rgba(210, 235, 255, 0.28)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#' + new THREE.Color(textColorHex ?? 0x000000).getHexString();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const words = String(text || '').split(/\s+/).filter(Boolean);
+        const maxWidth = canvas.width - 40;
+        let fontSize = 48;
+        let lines = [];
+
+        const wrapAtCurrentSize = () => {
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            lines = [];
+            let line = '';
+            for (const word of words) {
+                const test = line ? line + ' ' + word : word;
+                if (line && ctx.measureText(test).width > maxWidth) {
+                    lines.push(line);
+                    line = word;
+                } else {
+                    line = test;
+                }
+            }
+            if (line) lines.push(line);
+        };
+        wrapAtCurrentSize();
+        // Shrink the font until every line fits vertically too, so long text degrades
+        // gracefully instead of spilling off the block.
+        while (lines.length * (fontSize * 1.2) > canvas.height - 30 && fontSize > 16) {
+            fontSize -= 4;
+            wrapAtCurrentSize();
+        }
+
+        const lineHeight = fontSize * 1.2;
+        const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+        lines.forEach((line, i) => ctx.fillText(line, canvas.width / 2, startY + i * lineHeight));
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    // Redraws a Text Block's content in place (called from the Properties panel when the
+    // text/color is edited) - reuses the same canvas + geometry, just swaps the texture, so
+    // it's cheap and doesn't disturb the block's position/selection/transform gizmo.
+    updateTextBlockContent(mesh, text, textColor) {
+        if (!mesh || !mesh.userData || !mesh.userData._textCanvas) return;
+        const resolvedColor = textColor !== undefined ? textColor : (mesh.userData.serial && mesh.userData.serial.props && mesh.userData.serial.props.textColor) || 0x000000;
+        const newTex = this._drawTextTexture(mesh.userData._textCanvas, text, resolvedColor);
+
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        mats.forEach(m => {
+            if (m.map) {
+                m.map.dispose();
+                m.map = newTex;
+                m.needsUpdate = true;
+            }
+        });
+
+        if (mesh.userData.serial) {
+            mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, { text, textColor: resolvedColor });
         }
     }
 
@@ -355,18 +641,22 @@ export class World {
                 } else if (d.type === 'meta_script') {
                     this.setScript(d.text);
                 } else if (d.type === 'block' || d.type === 'box') {
-                    const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags);
+                    const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags, d.props && d.props.material);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
                     placedCount++;
                 } else if (d.type === 'sphere' || d.type === 'cylinder' || d.type === 'wedge') {
-                    const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags);
+                    const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags, d.props && d.props.material);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
+                    placedCount++;
+                } else if (d.type === 'bird') {
+                    const mesh = this.createBird(d.x, d.y, d.z);
+                    if (d.name) mesh.name = d.name;
                     placedCount++;
                 } else if (d.type === 'rigbot') {
                     // Can't build the player-model mesh here; hand it off to main.js after load.
@@ -377,8 +667,21 @@ export class World {
                     // hand it off to main.js after load, same pattern as pendingRigs.
                     this.pendingModels.push(d);
                     placedCount++;
+                } else if (d.type === 'text_block') {
+                    const props = d.props || {};
+                    const mesh = this.createTextBlock(d.x, d.y, d.z, props.text || 'Text', {
+                        w: d.w, h: d.h, d: d.d, textColor: props.textColor
+                    });
+                    mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
+                    mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    if (d.name) mesh.name = d.name;
+                    this._applyAnchorState(mesh, d);
+                    placedCount++;
+                } else if (d.type === 'weapon_pickup') {
+                    this.createWeaponPickup(d.x, d.y, d.z, (d.props && d.props.weaponType) || 'rocketlauncher');
                 } else if (d.type === 'weapon_rocketlauncher') {
-                    this.createWeaponPickup(d.x, d.y, d.z);
+                    // Legacy save format from before Sword existed - always a rocket launcher.
+                    this.createWeaponPickup(d.x, d.y, d.z, 'rocketlauncher');
                     placedCount++;
                 }
             } catch (e) {
@@ -395,32 +698,66 @@ export class World {
         }
     }
 
-    // Builds a simple rocket-launcher pickup: a small stand-alone gun model the player can
-    // walk up to and press E to equip in-game. No external assets needed (plain primitives),
-    // so - unlike RigBots/3D models - it can be fully reconstructed right here on load.
-    createWeaponPickup(x, y, z) {
+    // Builds a weapon pickup: a small stand-alone model the player can walk up to and press
+    // E to equip in-game. No external assets needed (plain primitives), so - unlike
+    // RigBots/3D models - it can be fully reconstructed right here on load. weaponType picks
+    // which model/behavior it is; more can be added here later without touching save/load,
+    // since they all share the same generic 'weapon_pickup' serialized type + props.weaponType.
+    createWeaponPickup(x, y, z, weaponType = 'rocketlauncher') {
         const group = new THREE.Group();
-        const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
-        const tubeMat = new THREE.MeshLambertMaterial({ color: 0x585858 });
 
-        const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.6, 10), tubeMat);
-        tube.rotation.z = Math.PI / 2;
-        group.add(tube);
+        if (weaponType === 'sword') {
+            const bladeMat = new THREE.MeshStandardMaterial({ color: 0xd8d8d8, metalness: 0.7, roughness: 0.25 });
+            const hiltMat = new THREE.MeshStandardMaterial({ color: 0x4a2e14, roughness: 0.8 });
+            const guardMat = new THREE.MeshStandardMaterial({ color: 0xc9a227, metalness: 0.6, roughness: 0.4 });
 
-        const grip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), bodyMat);
-        grip.position.set(-0.45, -0.35, 0);
-        group.add(grip);
+            const blade = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.035), bladeMat);
+            blade.position.set(0, 0.75, 0);
+            group.add(blade);
 
-        const sight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), bodyMat);
-        sight.position.set(0.35, 0.26, 0);
-        group.add(sight);
+            const tip = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.22, 4), bladeMat);
+            tip.position.set(0, 1.41, 0);
+            tip.rotation.y = Math.PI / 4;
+            group.add(tip);
+
+            const guard = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.08, 0.08), guardMat);
+            guard.position.set(0, 0.15, 0);
+            group.add(guard);
+
+            const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.35, 8), hiltMat);
+            grip.position.set(0, -0.05, 0);
+            group.add(grip);
+
+            const pommel = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), guardMat);
+            pommel.position.set(0, -0.24, 0);
+            group.add(pommel);
+
+            group.name = 'Sword';
+        } else {
+            weaponType = 'rocketlauncher';
+            const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
+            const tubeMat = new THREE.MeshLambertMaterial({ color: 0x585858 });
+
+            const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.6, 10), tubeMat);
+            tube.rotation.z = Math.PI / 2;
+            group.add(tube);
+
+            const grip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), bodyMat);
+            grip.position.set(-0.45, -0.35, 0);
+            group.add(grip);
+
+            const sight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), bodyMat);
+            sight.position.set(0.35, 0.26, 0);
+            group.add(sight);
+
+            group.name = 'RocketLauncher';
+        }
 
         group.position.set(x || 0, y || 0, z || 0);
-        group.name = 'RocketLauncher';
         group.userData = {
             isWeaponPickup: true,
-            weaponType: 'rocketlauncher',
-            serial: { type: 'weapon_rocketlauncher', w: 1, h: 1, d: 1, color: 0x2b2b2b, flags: [], props: {} }
+            weaponType,
+            serial: { type: 'weapon_pickup', w: 1, h: 1, d: 1, color: 0x2b2b2b, flags: [], props: { weaponType } }
         };
 
         // Not passed through addToWorld()'s 'static' flag on purpose - a pickup shouldn't
@@ -444,10 +781,10 @@ export class World {
         if (types.includes('finish')) this.finishPads.push(mesh);
     }
 
-    createPart(type, x, y, z, size, color, flags = ['static']) {
+    createPart(type, x, y, z, size, color, flags = ['static'], material = 'plastic') {
         // Wrapper for shapes
         if (type === 'block' || type === 'box') {
-            return this.createBlock(x, y, z, size.x, size.y, size.z, color, flags);
+            return this.createBlock(x, y, z, size.x, size.y, size.z, color, flags, material);
         }
 
         let geo;
@@ -485,12 +822,7 @@ export class World {
             geo.computeVertexNormals();
         }
 
-        const col = new THREE.Color(color);
-        const mat = new THREE.MeshStandardMaterial({ 
-            map: surfaceManager.textures.studs, 
-            color: col,
-            roughness: 0.5 
-        });
+        const mat = buildPartMaterials(material, color, false);
 
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.set(x, y, z);
@@ -501,7 +833,8 @@ export class World {
             type: type,
             w: size.x, h: size.y, d: size.z,
             color: color,
-            flags: flags
+            flags: flags,
+            props: { material: material || 'plastic' }
         };
         
         mesh.name = type.charAt(0).toUpperCase() + type.slice(1);
@@ -509,18 +842,11 @@ export class World {
         return mesh;
     }
 
-    createBlock(x, y, z, w, h, d, color, types = ['static']) {
+    createBlock(x, y, z, w, h, d, color, types = ['static'], material = 'plastic') {
         const geo = new THREE.BoxGeometry(w, h, d);
         boxUnwrapUVs(geo);
-        
-        const col = new THREE.Color(color);
 
-        const studMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.studs, color: col });
-        const inletMat = new THREE.MeshStandardMaterial({ map: surfaceManager.textures.inlet, color: col });
-        const sideMat = new THREE.MeshStandardMaterial({ color: col });
-        
-        // Top=Studs, Bottom=Inlet
-        const mats = [sideMat, sideMat, studMat, inletMat, sideMat, sideMat];
+        const mats = buildPartMaterials(material, color, true);
         const mesh = new THREE.Mesh(geo, mats);
         mesh.position.set(x, y, z);
         
@@ -529,7 +855,8 @@ export class World {
             type: 'block',
             w: w, h: h, d: d,
             color: color,
-            flags: types
+            flags: types,
+            props: { material: material || 'plastic' }
         };
 
         if (types.includes('spawn')) {
