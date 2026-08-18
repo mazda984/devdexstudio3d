@@ -11,7 +11,7 @@
   Those indicate behavior intended to be moved into new files rather than deleted outright.
 */
 import * as THREE from 'three';
-import { createPlayerMesh } from './Player.js';
+import { createPlayerMesh, Player } from './Player.js';
 
 export class RemotePlayer {
     constructor(scene, initialData = {}) {
@@ -32,6 +32,17 @@ export class RemotePlayer {
         this.rightLeg = this.mesh.children[5];
 
         this.addNameTag();
+
+        // Appearance state (colors/hat/face/shirt) - mirrors Player.js's `this.appearance`
+        // shape exactly, since applyAppearance() below reuses Player.prototype's own
+        // createHat/setFaceTexture/setShirtTexture methods (they only ever touch
+        // this.materials/this.mesh/this.head/this.appearance, all of which a RemotePlayer
+        // also has, so there's no need to duplicate that fairly involved logic here).
+        this.appearance = { colors: {}, faceUrl: null, shirtUrl: null, hat: null };
+        this._hat = null;
+        this._hatBillboardPlane = null;
+        this._appliedFaceUrl = null;
+        this._appliedShirtUrl = null;
 
         // State for interpolation
         this.targetPos = new THREE.Vector3();
@@ -197,103 +208,43 @@ export class RemotePlayer {
     }
 
     applyAppearance(app) {
+        if (!app) return;
         if (app.colors) {
             for (const [part, col] of Object.entries(app.colors)) {
                 this.setPartColor(part, col);
             }
         }
-        // Heavier fields (shirtUrl/hat) only arrive via the occasional 'appearance_full'
-        // broadcast (see main.js), not the per-frame presence packet - apply them here too
-        // since both paths funnel through applyAppearance().
+
+        // Hat: cheap enough (small JSON, no big images) to travel in presence directly, same
+        // as colors above.
+        if (app.hat && JSON.stringify(app.hat) !== JSON.stringify(this.appearance.hat)) {
+            Player.prototype.createHat.call(this, app.hat);
+        } else if (!app.hat && this.appearance.hat) {
+            Player.prototype.removeHat.call(this);
+        }
+
+        // Face/shirt textures: these arrive via the one-shot 'appearance' room message (see
+        // main.js's broadcastAppearance()), not presence - presence gets re-sent in full on
+        // every single position update, so putting multi-KB image data URLs in there would
+        // mean re-transmitting them dozens of times a second for no reason. Skip re-applying
+        // if it's the exact same URL we already have (avoids redundant texture rebuilds on
+        // every routine presence/appearance ping).
+        if (app.faceUrl && app.faceUrl !== this._appliedFaceUrl) {
+            this._appliedFaceUrl = app.faceUrl;
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => Player.prototype.setFaceTexture.call(this, img, app.faceUrl);
+            img.onerror = () => console.warn('Failed to load a remote player\'s face texture');
+            img.src = app.faceUrl;
+        }
         if (app.shirtUrl && app.shirtUrl !== this._appliedShirtUrl) {
-            this.setShirtTexture(app.shirtUrl);
+            this._appliedShirtUrl = app.shirtUrl;
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => Player.prototype.setShirtTexture.call(this, img, app.shirtUrl);
+            img.onerror = () => console.warn('Failed to load a remote player\'s shirt texture');
+            img.src = app.shirtUrl;
         }
-        if (app.hat !== undefined && JSON.stringify(app.hat) !== this._appliedHatKey) {
-            this.createHat(app.hat);
-        }
-    }
-
-    // Mirrors Player.js's setShirtTexture, simplified to just accept a data URL/URL string
-    // (remote players only ever receive an already-serialized shirtUrl, never a live canvas).
-    setShirtTexture(dataUrl) {
-        if (!dataUrl || typeof dataUrl !== 'string') return;
-        this._appliedShirtUrl = dataUrl;
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => {
-            try {
-                const tex = new THREE.CanvasTexture(img);
-                tex.minFilter = THREE.LinearFilter;
-                tex.magFilter = THREE.LinearFilter;
-                tex.colorSpace = THREE.SRGBColorSpace;
-                tex.wrapS = THREE.ClampToEdgeWrapping;
-                tex.wrapT = THREE.ClampToEdgeWrapping;
-                tex.needsUpdate = true;
-
-                const mats = this.materials.torso;
-                if (mats && mats[4]) {
-                    mats[4].map = tex;
-                    const aspect = (img.width || 1) / (img.height || 1);
-                    if (aspect > 1) {
-                        mats[4].map.repeat.set(1, 1 / aspect);
-                        mats[4].map.offset.set(0, 0.5 - (0.5 * (1 / aspect)));
-                    } else {
-                        mats[4].map.repeat.set(aspect || 1, 1);
-                        mats[4].map.offset.set(0.5 - (0.5 * (aspect || 1)), 0);
-                    }
-                    mats[4].color = new THREE.Color(0xffffff);
-                    mats[4].needsUpdate = true;
-                }
-            } catch (err) {
-                console.warn('Failed to apply remote shirt texture:', err);
-            }
-        };
-        img.onerror = () => console.warn('Failed loading remote shirt texture');
-        img.src = dataUrl;
-    }
-
-    // Mirrors Player.js's createHat, simplified: remote players only ever get the
-    // "Devdex catalog item" image-billboard case (that's the only hat type currently
-    // sent over the network), always attached directly to the head.
-    createHat(hatData) {
-        this._appliedHatKey = JSON.stringify(hatData);
-        if (this._hat && this._hat.parent) {
-            this._hat.parent.remove(this._hat);
-            this._hat.traverse(c => {
-                if (c.geometry) c.geometry.dispose();
-                if (c.material) (Array.isArray(c.material) ? c.material : [c.material]).forEach(m => m.dispose && m.dispose());
-            });
-            this._hat = null;
-            this._hatBillboardPlane = null;
-        }
-        if (!hatData || hatData.type !== 'image' || !hatData.imageUrl) return;
-
-        const hatGroup = new THREE.Group();
-        hatGroup.name = 'hat';
-        const size = hatData.size || 1.1;
-        const plane = new THREE.Mesh(
-            new THREE.PlaneGeometry(size, size),
-            new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, color: 0xffffff, depthWrite: false }),
-        );
-        plane.position.y = 0.95;
-        hatGroup.add(plane);
-        hatGroup.scale.set(0.6, 0.6, 0.6);
-        hatGroup.position.set(0, 0.6, 0);
-        this.head.add(hatGroup);
-        this._hat = hatGroup;
-        this._hatBillboardPlane = plane;
-
-        const loader = new THREE.TextureLoader();
-        loader.load(
-            hatData.imageUrl,
-            (tex) => {
-                tex.colorSpace = THREE.SRGBColorSpace;
-                plane.material.map = tex;
-                plane.material.needsUpdate = true;
-            },
-            undefined,
-            (err) => console.warn('Failed to load remote catalog item hat image:', err),
-        );
     }
 
     setBodyVisible(visible) {
@@ -351,19 +302,6 @@ export class RemotePlayer {
     }
 
     update(dt, camera, world) {
-        // Keep the catalog-item hat billboard facing the camera, same as the local
-        // player (see Player.js update()) - otherwise it shows its edge/back or
-        // clips into the head from most angles.
-        if (camera && this._hatBillboardPlane) {
-            const parent = this._hatBillboardPlane.parent;
-            if (parent) {
-                parent.updateWorldMatrix(true, false);
-                const parentWorldQuat = new THREE.Quaternion();
-                parent.getWorldQuaternion(parentWorldQuat);
-                this._hatBillboardPlane.quaternion.copy(parentWorldQuat.clone().invert().multiply(camera.quaternion.clone()));
-            }
-        }
-
         if (this.isDead) {
             // Debris Physics
             const gravity = -100;

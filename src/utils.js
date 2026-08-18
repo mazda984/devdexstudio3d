@@ -121,3 +121,22 @@ export class SurfaceManager {
 
 export const surfaceManager = new SurfaceManager();
 
+// Named block materials (in addition to the default "Plastic" studs/inlet look above).
+// These wrap the user-supplied photo textures (wood planks, grass, fabric) as simple
+// tileable Standard materials so they can be selected per-block from the Properties
+// panel (see index.html #prop-material / main.js applyPartMaterial()).
+export const materialTextures = {};
+(() => {
+    const loader = new THREE.TextureLoader();
+    const defs = { wood: './woodplanks.png', grass: './grass.png', fabric: './fabric.png', water: './watertexture.png', metal: './diamondplate.png', slate: './slate.png' };
+    for (const [key, path] of Object.entries(defs)) {
+        const tex = loader.load(path);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        materialTextures[key] = tex;
+    }
+})();
+
