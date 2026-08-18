@@ -678,9 +678,12 @@
 
                 _goSolo() {
                     // No network / PeerJS unavailable / broker unreachable - keep the game
-                    // fully playable offline, just without other players.
+                    // fully playable offline, just without other players. Treated as "host"
+                    // (there's no one else to defer to) so things like ball/object physics -
+                    // which only the host simulates in a real room - still run locally.
                     this.clientId = this.clientId || ('local-' + Math.random().toString(36).slice(2, 10));
                     this.presence[this.clientId] = this.presence[this.clientId] || { username: 'Guest' };
+                    this.isHost = true;
                 }
 
                 // Public STUN/TURN servers so connections still work across different networks
@@ -1098,10 +1101,6 @@
                         <span>Model</span>
                     </div>
                     <input type="file" id="model-file-input" accept=".glb,.gltf" style="display:none">
-                    <div class="tool-btn" id="tool-textblock" title="Place a transparent block you can write text on">
-                        <div style="font-size: 20px;">🔤</div>
-                        <span>Text</span>
-                    </div>
                     <div class="tool-btn" id="tool-delete">
                         <div style="font-size: 24px; font-weight: bold; color: red;">X</div>
                         <span>Delete</span>
@@ -1166,27 +1165,6 @@
                     <input type="color" id="prop-rig-color" class="prop-val">
                 </div>
             </div>
-            <div id="prop-section-weapon" style="display:none;">
-                <div class="prop-header" style="background: #eee; font-weight: normal;">Weapon</div>
-                <div class="prop-row">
-                    <span class="prop-label">Type</span>
-                    <select id="prop-weapon-type" class="prop-val">
-                        <option value="rocketlauncher">Rocket Launcher</option>
-                        <option value="sword">Sword</option>
-                    </select>
-                </div>
-            </div>
-            <div id="prop-section-text" style="display:none;">
-                <div class="prop-header" style="background: #eee; font-weight: normal;">Text</div>
-                <div class="prop-row" style="align-items:flex-start;">
-                    <span class="prop-label">Content</span>
-                    <textarea id="prop-text-content" class="prop-val" rows="3" style="resize:vertical; font-family:inherit;" placeholder="Type text..."></textarea>
-                </div>
-                <div class="prop-row">
-                    <span class="prop-label">Text Color</span>
-                    <input type="color" id="prop-text-color" class="prop-val" value="#000000">
-                </div>
-            </div>
             <div class="prop-header" style="background: #eee; font-weight: normal;">Basic</div>
             <div class="prop-row">
                 <span class="prop-label">Name</span>
@@ -1196,18 +1174,6 @@
             <div class="prop-row">
                 <span class="prop-label">Color</span>
                 <input type="color" id="prop-color" class="prop-val">
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">Material</span>
-                <select id="prop-material" class="prop-val">
-                    <option value="plastic">Plastic</option>
-                    <option value="wood">Wood</option>
-                    <option value="grass">Grass</option>
-                    <option value="fabric">Fabric</option>
-                    <option value="water">Water</option>
-                    <option value="metal">Metal</option>
-                    <option value="slate">Slate</option>
-                </select>
             </div>
             <div class="prop-row">
                 <span class="prop-label">Reflectance</span>
