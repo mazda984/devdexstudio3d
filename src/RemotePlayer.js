@@ -215,12 +215,18 @@ export class RemotePlayer {
             }
         }
 
-        // Hat: cheap enough (small JSON, no big images) to travel in presence directly, same
-        // as colors above.
-        if (app.hat && JSON.stringify(app.hat) !== JSON.stringify(this.appearance.hat)) {
-            Player.prototype.createHat.call(this, app.hat);
-        } else if (!app.hat && this.appearance.hat) {
-            Player.prototype.removeHat.call(this);
+        // Hat: small hats (image billboard / constructed primitives) travel in presence
+        // (see Player.serializeAppearance()); large model hats (GLB, see the U-key hat
+        // picker) travel via the one-shot 'appearance' message instead, same reasoning as
+        // shirt/face below. Either path lands here - only touch hat state when the
+        // payload actually says something about it (a shirt/face-only broadcast has no
+        // 'hat' key at all, and must NOT be treated as "remove the hat").
+        if (Object.prototype.hasOwnProperty.call(app, 'hat')) {
+            if (app.hat && JSON.stringify(app.hat) !== JSON.stringify(this.appearance.hat)) {
+                Player.prototype.createHat.call(this, app.hat);
+            } else if (!app.hat && this.appearance.hat) {
+                Player.prototype.removeHat.call(this);
+            }
         }
 
         // Face/shirt textures: these arrive via the one-shot 'appearance' room message (see

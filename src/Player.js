@@ -34,6 +34,15 @@ const _glbHeadInstances = [];
  * group: THREE.Group returned by createPlayerMesh
  * head:  the original box head mesh created inside that group
  */
+// Small local helper (mirrors main.js's base64ToArrayBuffer) so createHat()'s GLB-model
+// branch doesn't need a cross-module import just for this one conversion.
+function base64ToArrayBufferGlobal(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
 function attachGlbHeadToGroup(group, head) {
     if (!_glbHeadTemplate || !group || !head) return;
 
@@ -675,6 +684,43 @@ export class Player {
                 undefined,
                 (err) => console.warn('Failed to load Devdex catalog item image for hat:', err),
             );
+        } else if (hatData.type === 'model' && hatData.data) {
+            // A real .glb worn as a hat (see the U-key hat picker in main.js). hatData.data
+            // is a base64 string (from a bundled/uploaded file) or a raw ArrayBuffer (used
+            // right after picking a file, before it's been base64-encoded for
+            // saving/networking) - GLTFLoader.parse() accepts either.
+            const loader = new GLTFLoader();
+            const buffer = (typeof hatData.data === 'string') ? base64ToArrayBufferGlobal(hatData.data) : hatData.data;
+            loader.parse(buffer, '', (gltf) => {
+                const model = gltf.scene || gltf.scenes[0];
+                model.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+
+                // Normalize scale: hats can come from wildly different modeling scales
+                // (some export at 1 unit = 1cm, others 1 unit = 1m), so auto-fit to a
+                // consistent, head-sized bounding box instead of hard-coding one scale
+                // factor that would make some hats tiny and others enormous.
+                const box = new THREE.Box3().setFromObject(model);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                const maxDim = Math.max(size.x, size.y, size.z) || 1;
+                const targetSize = hatData.size || 1.6; // roughly head-width, in world studs
+                const fitScale = targetSize / maxDim;
+                model.scale.setScalar(fitScale);
+
+                // Re-measure after scaling and shift so the model's own bottom sits at its
+                // local origin - otherwise a model authored with its origin at its center
+                // (rather than its base) would spawn half-buried in/floating off the head.
+                const box2 = new THREE.Box3().setFromObject(model);
+                model.position.y -= box2.min.y;
+
+                hatGroup.add(model);
+                // If this hat is still the equipped one by the time loading finishes (it's
+                // async - the player could have switched hats again in the meantime),
+                // refresh the visible group reference.
+                if (this._hat === hatGroup) this._hat = hatGroup;
+            }, (err) => {
+                console.warn('Failed to load GLB hat model:', err);
+            });
         } else if (hatData.constructed && hatData.parts && hatData.parts.length > 0) {
             // Load custom composed hat
             hatData.parts.forEach((p) => {
@@ -2023,17 +2069,27 @@ export class Player {
 
     serializeAppearance() {
         // Presence gets re-broadcast in full on every single position/rotation update (many
-        // times a second), so this stays deliberately lightweight: colors and hat are small
-        // JSON and fine to include here. Shirt/face textures are full image data URLs (can
-        // be tens of KB) - repeating those dozens of times a second would be wasteful and
-        // can bog down the P2P connection, so they're sent separately, once, via
+        // times a second), so this stays deliberately lightweight: colors and small hats
+        // (image billboard / constructed primitives) are tiny JSON and fine to include here.
+        // Shirt/face textures AND model-based (GLB) hats are full binary/image data that can
+        // be tens-hundreds of KB - repeating those dozens of times a second would be wasteful
+        // and can bog down the P2P connection, so those are sent separately, once, via
         // broadcastAppearance() in main.js instead (see RemotePlayer.applyAppearance()).
-        return {
+        const hat = this.appearance.hat;
+        const isHeavyHat = hat && hat.type === 'model';
+        const result = {
             colors: this.appearance.colors || {},
-            hat: this.appearance.hat || null,
             hasFace: !!this.appearance.faceUrl,
-            hasShirt: !!this.appearance.shirtUrl
+            hasShirt: !!this.appearance.shirtUrl,
+            hasModelHat: !!isHeavyHat
         };
+        // Deliberately OMITTED (not set to null) for model hats: RemotePlayer.applyAppearance
+        // only touches hat state when the payload actually has a 'hat' key at all, so leaving
+        // it out here means a presence update can never stomp on a model hat that arrived
+        // separately via the one-shot broadcast - only an explicit "hat: null" (a real
+        // small-hat removal) does that.
+        if (!isHeavyHat) result.hat = hat || null;
+        return result;
     }
 
     deserializeAppearance(data) {

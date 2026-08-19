@@ -303,23 +303,29 @@ const player = new Player(scene);
 const remotePlayers = {}; // Changed to Object for ID mapping
 let appearanceBroadcastTimer = 0; // throttle for the periodic re-broadcast in updatePlaying()
 
-// Sends the local player's current shirt/face textures to everyone else, once. Kept OUT of
-// the regular presence system on purpose - presence gets rebroadcast in full every single
-// frame (see updatePresence's merge-then-resend-everything design), so putting full image
-// data URLs there would mean re-sending them dozens of times a second. A plain one-shot
-// room.send() message is exactly what "tell everyone my shirt is this image" needs instead.
+// Sends the local player's current shirt/face textures (and, if equipped, a model-based
+// GLB hat from the U-key hat picker) to everyone else, once. Kept OUT of the regular
+// presence system on purpose - presence gets rebroadcast in full every single frame (see
+// updatePresence's merge-then-resend-everything design), so putting full image/model data
+// there would mean re-sending it dozens of times a second. A plain one-shot room.send()
+// message is exactly what "tell everyone my shirt/hat is this" needs instead.
 // Called: once right after the initial presence push, periodically (throttled) while
 // playing so it eventually reaches anyone who missed the first shot, and immediately
 // whenever a new player is seen joining (so they don't have to wait for the next tick).
 function broadcastAppearance() {
     if (!player || !player.appearance) return;
-    if (!player.appearance.shirtUrl && !player.appearance.faceUrl) return; // nothing to send
+    const isModelHat = player.appearance.hat && player.appearance.hat.type === 'model';
+    if (!player.appearance.shirtUrl && !player.appearance.faceUrl && !isModelHat) return; // nothing to send
     try {
-        room.send({
+        const payload = {
             type: 'appearance',
             shirtUrl: player.appearance.shirtUrl || null,
             faceUrl: player.appearance.faceUrl || null
-        });
+        };
+        // Only include 'hat' for model-type hats - small hats (image/constructed) already
+        // travel via presence, and including them here too would just be redundant traffic.
+        if (isModelHat) payload.hat = player.appearance.hat;
+        room.send(payload);
     } catch (e) {}
 }
 
@@ -2501,6 +2507,148 @@ function updateHealthHUD() {
     healthBarText.textContent = `${Math.ceil(player.health)} / ${player.maxHealth}`;
 }
 
+// --- Hat Picker (press U): equip a real .glb model as a hat --------------------------
+// Bundled defaults ship with the game; players can also add more from their own .glb
+// files or a .zip full of them, for the current session (not saved into the map itself -
+// this is a per-player avatar accessory, same category as shirt/face/hat color).
+const BUNDLED_HATS = [
+    { name: 'Gold Dominus', url: './hats/gold_dominus_hat.glb' },
+    { name: 'Doge Hat', url: './hats/roblox_doge_hat.glb' },
+];
+const uploadedHats = []; // { name, data: base64 } - added this session via the Upload button
+
+const hatPicker = document.createElement('div');
+hatPicker.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1200; display:none; align-items:center; justify-content:center; font-family:sans-serif;';
+hatPicker.innerHTML = `
+    <div style="background:#1e1e1e; color:#fff; border-radius:10px; padding:20px; width:420px; max-width:90vw; max-height:80vh; display:flex; flex-direction:column; gap:12px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:0; font-size:16px;">🎩 Choose a Hat</h3>
+            <button id="hat-picker-close" style="background:none; border:none; color:#aaa; font-size:20px; cursor:pointer; line-height:1;">×</button>
+        </div>
+        <div id="hat-picker-grid" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; overflow-y:auto; max-height:320px; padding:2px;"></div>
+        <div style="display:flex; gap:8px; border-top:1px solid #3a3a3a; padding-top:12px;">
+            <button id="hat-picker-remove" style="flex:1; padding:8px; background:#3a3a3a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Remove Hat</button>
+            <button id="hat-picker-upload-btn" style="flex:1; padding:8px; background:#3d7de0; color:#fff; border:none; border-radius:6px; cursor:pointer;">Upload .glb/.zip</button>
+        </div>
+        <input type="file" id="hat-picker-upload-input" accept=".glb,.zip" multiple style="display:none">
+    </div>
+`;
+document.body.appendChild(hatPicker);
+const hatPickerGrid = hatPicker.querySelector('#hat-picker-grid');
+
+function renderHatPickerGrid() {
+    hatPickerGrid.innerHTML = '';
+    const allHats = [...BUNDLED_HATS, ...uploadedHats];
+    allHats.forEach((hat) => {
+        const btn = document.createElement('button');
+        const isEquipped = player.appearance && player.appearance.hat && player.appearance.hat.name === hat.name && player.appearance.hat.type === 'model';
+        btn.style.cssText = `display:flex; flex-direction:column; align-items:center; gap:6px; padding:10px 6px; background:${isEquipped ? '#3d7de0' : '#2a2a2a'}; border:1px solid ${isEquipped ? '#5a9bff' : '#3a3a3a'}; border-radius:8px; color:#fff; cursor:pointer; font-size:12px;`;
+        btn.innerHTML = `<div style="font-size:26px;">🎩</div><div style="text-align:center; word-break:break-word;">${hat.name}</div>`;
+        btn.onclick = () => equipHat(hat);
+        hatPickerGrid.appendChild(btn);
+    });
+    if (allHats.length === 0) {
+        hatPickerGrid.innerHTML = '<div style="grid-column:1/-1; color:#888; text-align:center; padding:20px 0;">No hats yet - upload a .glb or .zip below.</div>';
+    }
+}
+
+// Equips `hat` ({name, url} for bundled, or {name, data:base64} for uploaded) as a GLB
+// model hat: fetches/reads it into base64 if needed, applies it via Player.createHat,
+// persists it locally, and tells other players about it (see broadcastAppearance()).
+async function equipHat(hat) {
+    try {
+        let base64 = hat.data;
+        if (!base64 && hat.url) {
+            const resp = await fetch(hat.url);
+            const buffer = await resp.arrayBuffer();
+            base64 = arrayBufferToBase64(buffer);
+        }
+        if (!base64) return;
+
+        const hatData = { type: 'model', name: hat.name, data: base64, size: 1.6 };
+        player.createHat(hatData);
+
+        const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
+        save.hat = hatData;
+        localStorage.setItem('nblox_appearance', JSON.stringify(save));
+
+        broadcastAppearance();
+        renderHatPickerGrid();
+        addChatMessage('System', `Equipped "${hat.name}" hat!`);
+    } catch (e) {
+        console.warn('Failed to equip hat:', e);
+        addChatMessage('System', `Couldn't load "${hat.name}" - the file may be corrupted.`);
+    }
+}
+
+function removeEquippedHat() {
+    player.removeHat();
+    player.appearance.hat = null;
+    const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
+    save.hat = null;
+    localStorage.setItem('nblox_appearance', JSON.stringify(save));
+    broadcastAppearance();
+    renderHatPickerGrid();
+}
+
+function openHatPicker() {
+    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    renderHatPickerGrid();
+    hatPicker.style.display = 'flex';
+    if (document.pointerLockElement) document.exitPointerLock();
+}
+function closeHatPicker() {
+    hatPicker.style.display = 'none';
+    if ((gameState === 'PLAYING' || gameState === 'TEST') && !document.pointerLockElement) {
+        renderer.domElement.requestPointerLock().catch(() => {});
+    }
+}
+hatPicker.querySelector('#hat-picker-close').onclick = closeHatPicker;
+hatPicker.querySelector('#hat-picker-remove').onclick = removeEquippedHat;
+hatPicker.addEventListener('click', (e) => { if (e.target === hatPicker) closeHatPicker(); });
+
+const hatUploadInput = hatPicker.querySelector('#hat-picker-upload-input');
+hatPicker.querySelector('#hat-picker-upload-btn').onclick = () => hatUploadInput.click();
+hatUploadInput.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    for (const file of files) {
+        try {
+            if (file.name.toLowerCase().endsWith('.zip')) {
+                // A zip of multiple .glb hats: add every .glb entry inside as its own option.
+                const buffer = await file.arrayBuffer();
+                const zip = await JSZip.loadAsync(buffer);
+                const glbEntries = Object.values(zip.files).filter(f => !f.dir && f.name.toLowerCase().endsWith('.glb'));
+                for (const entry of glbEntries) {
+                    const data = await entry.async('base64');
+                    const name = entry.name.split('/').pop().replace(/\.glb$/i, '');
+                    uploadedHats.push({ name, data });
+                }
+                if (glbEntries.length === 0) {
+                    addChatMessage('System', `"${file.name}" doesn't contain any .glb files.`);
+                }
+            } else if (file.name.toLowerCase().endsWith('.glb')) {
+                const buffer = await file.arrayBuffer();
+                const data = arrayBufferToBase64(buffer);
+                uploadedHats.push({ name: file.name.replace(/\.glb$/i, ''), data });
+            }
+        } catch (err) {
+            console.warn(`Failed to read "${file.name}":`, err);
+            addChatMessage('System', `Couldn't read "${file.name}".`);
+        }
+    }
+    renderHatPickerGrid();
+    e.target.value = '';
+});
+
+window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() !== 'u') return;
+    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    e.preventDefault();
+    if (hatPicker.style.display === 'flex') closeHatPicker();
+    else openHatPicker();
+});
+
 // Deals damage to whoever is at `targetId` (a room clientId): applies it directly if that's
 // us, otherwise sends a network message so the actual owner of that player applies it to
 // their own health (client-authoritative: the attacker decides a hit landed, the victim's
@@ -3579,6 +3727,25 @@ room.onmessage = (evt) => {
             // the target (never trust/apply damage aimed at someone else).
             if (data.targetId === room.clientId && typeof player !== 'undefined') {
                 player.takeDamage(data.damage || 0);
+            }
+            return;
+        }
+
+        if (data.type === 'appearance') {
+            // One-shot shirt/face/model-hat sync (see broadcastAppearance()) - this was
+            // being sent but never actually listened for, so nobody's custom shirt/face/
+            // hat ever reached anyone else. Ignore our own echo, apply everyone else's to
+            // their RemotePlayer.
+            if (evt.clientId && evt.clientId !== room.clientId) {
+                const rp = remotePlayers[evt.clientId];
+                if (rp && typeof rp.applyAppearance === 'function') {
+                    const payload = { shirtUrl: data.shirtUrl, faceUrl: data.faceUrl };
+                    // Only include 'hat' at all if the sender actually said something about
+                    // it (see RemotePlayer.applyAppearance's hasOwnProperty check) - a plain
+                    // shirt/face broadcast must never be mistaken for "remove the hat".
+                    if (Object.prototype.hasOwnProperty.call(data, 'hat')) payload.hat = data.hat;
+                    rp.applyAppearance(payload);
+                }
             }
             return;
         }
