@@ -2560,6 +2560,7 @@ async function equipHat(hat) {
         let base64 = hat.data;
         if (!base64 && hat.url) {
             const resp = await fetch(hat.url);
+            if (!resp.ok) throw new Error(`Fetch failed: ${resp.status} ${resp.statusText}`);
             const buffer = await resp.arrayBuffer();
             base64 = arrayBufferToBase64(buffer);
         }
@@ -2568,25 +2569,40 @@ async function equipHat(hat) {
         const hatData = { type: 'model', name: hat.name, data: base64, size: 1.6 };
         player.createHat(hatData);
 
-        const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
-        save.hat = hatData;
-        localStorage.setItem('nblox_appearance', JSON.stringify(save));
+        // Saving locally is a nice-to-have, not something that should block the equip
+        // itself: base64 GLB data can be a few hundred KB, and on top of any maps already
+        // saved in localStorage that can trip the browser's per-origin storage quota. If
+        // it fails, the hat should still visibly equip and sync to other players below -
+        // previously a quota error here aborted BEFORE those two steps, so the hat would
+        // silently equip on your own screen but never show as "selected" in the picker and
+        // never reach anyone else, while reporting a misleading "file may be corrupted".
+        try {
+            const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
+            save.hat = hatData;
+            localStorage.setItem('nblox_appearance', JSON.stringify(save));
+        } catch (storageErr) {
+            console.warn('Could not save hat choice locally (equipped anyway):', storageErr);
+        }
 
         broadcastAppearance();
         renderHatPickerGrid();
         addChatMessage('System', `Equipped "${hat.name}" hat!`);
     } catch (e) {
-        console.warn('Failed to equip hat:', e);
-        addChatMessage('System', `Couldn't load "${hat.name}" - the file may be corrupted.`);
+        console.error('Failed to equip hat:', e);
+        addChatMessage('System', `Couldn't equip "${hat.name}": ${e.message || 'unknown error'}. Check the browser console (F12) for details.`);
     }
 }
 
 function removeEquippedHat() {
     player.removeHat();
     player.appearance.hat = null;
-    const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
-    save.hat = null;
-    localStorage.setItem('nblox_appearance', JSON.stringify(save));
+    try {
+        const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
+        save.hat = null;
+        localStorage.setItem('nblox_appearance', JSON.stringify(save));
+    } catch (storageErr) {
+        console.warn('Could not save hat removal locally:', storageErr);
+    }
     broadcastAppearance();
     renderHatPickerGrid();
 }
