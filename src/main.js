@@ -301,6 +301,7 @@ menuGroup.position.set(3.5, 1.5, 8);
  // Init Player
 const player = new Player(scene);
 const remotePlayers = {}; // Changed to Object for ID mapping
+let appearanceBroadcastTimer = 0; // throttle for the periodic re-broadcast in updatePlaying()
 
 // Sends the local player's current shirt/face textures to everyone else, once. Kept OUT of
 // the regular presence system on purpose - presence gets rebroadcast in full every single
