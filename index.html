@@ -1098,6 +1098,10 @@
                         <span>Model</span>
                     </div>
                     <input type="file" id="model-file-input" accept=".glb,.gltf" style="display:none">
+                    <div class="tool-btn" id="tool-textblock" title="Place a transparent block you can write text on">
+                        <div style="font-size: 20px;">🔤</div>
+                        <span>Text</span>
+                    </div>
                     <div class="tool-btn" id="tool-delete">
                         <div style="font-size: 24px; font-weight: bold; color: red;">X</div>
                         <span>Delete</span>
@@ -1136,6 +1140,12 @@
                         <div style="font-size: 18px;">🌞/🌙</div>
                         <span>Day/Night</span>
                     </div>
+
+                    <!-- Default camera mode (first-person vs third-person) for this map -->
+                    <div class="tool-btn" id="tool-camera-mode" title="Set default camera view">
+                        <div style="font-size: 18px;">🎥</div>
+                        <span>Camera</span>
+                    </div>
                 </div>
                 <div class="tool-group" style="margin-left: auto; margin-right: 20px;">
                     <div class="tool-btn" id="tool-play-solo" style="width: 60px;">
@@ -1160,6 +1170,27 @@
                 <div class="prop-row">
                     <span class="prop-label">Body Color</span>
                     <input type="color" id="prop-rig-color" class="prop-val">
+                </div>
+            </div>
+            <div id="prop-section-weapon" style="display:none;">
+                <div class="prop-header" style="background: #eee; font-weight: normal;">Weapon</div>
+                <div class="prop-row">
+                    <span class="prop-label">Type</span>
+                    <select id="prop-weapon-type" class="prop-val">
+                        <option value="rocketlauncher">Rocket Launcher</option>
+                        <option value="sword">Sword</option>
+                    </select>
+                </div>
+            </div>
+            <div id="prop-section-text" style="display:none;">
+                <div class="prop-header" style="background: #eee; font-weight: normal;">Text</div>
+                <div class="prop-row" style="align-items:flex-start;">
+                    <span class="prop-label">Content</span>
+                    <textarea id="prop-text-content" class="prop-val" rows="3" style="resize:vertical; font-family:inherit;" placeholder="Type text..."></textarea>
+                </div>
+                <div class="prop-row">
+                    <span class="prop-label">Text Color</span>
+                    <input type="color" id="prop-text-color" class="prop-val" value="#000000">
                 </div>
             </div>
             <div class="prop-header" style="background: #eee; font-weight: normal;">Basic</div>
@@ -1187,6 +1218,25 @@
             <div class="prop-row">
                 <span class="prop-label">Reflectance</span>
                 <input type="number" id="prop-reflect" min="0" max="1" step="0.1" class="prop-val">
+            </div>
+            <div id="prop-section-light">
+                <div class="prop-header" style="background: #eee; font-weight: normal;">Light</div>
+                <div class="prop-row">
+                    <span class="prop-label">Emits Light</span>
+                    <input type="checkbox" id="prop-light-enabled">
+                </div>
+                <div class="prop-row">
+                    <span class="prop-label">Light Color</span>
+                    <input type="color" id="prop-light-color" class="prop-val" value="#ffffaa">
+                </div>
+                <div class="prop-row">
+                    <span class="prop-label">Intensity</span>
+                    <input type="range" id="prop-light-intensity" class="prop-val" min="0.1" max="5" step="0.1" value="1.2">
+                </div>
+                <div class="prop-row">
+                    <span class="prop-label">Range</span>
+                    <input type="range" id="prop-light-distance" class="prop-val" min="2" max="40" step="1" value="12">
+                </div>
             </div>
              <div class="prop-row">
                 <span class="prop-label">Transparency</span>

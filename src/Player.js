@@ -34,6 +34,15 @@ const _glbHeadInstances = [];
  * group: THREE.Group returned by createPlayerMesh
  * head:  the original box head mesh created inside that group
  */
+// Small local helper (mirrors main.js's base64ToArrayBuffer) so createHat()'s GLB-model
+// branch doesn't need a cross-module import just for this one conversion.
+function base64ToArrayBufferGlobal(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
 function attachGlbHeadToGroup(group, head) {
     if (!_glbHeadTemplate || !group || !head) return;
 
@@ -291,6 +300,11 @@ export class Player {
         this.isDead = false;
         this.debris = [];
         this.respawnTimer = 0;
+
+        // Health: weapons (rocket splash damage, sword hits) reduce this; hitting 0 triggers
+        // the same ragdoll/respawn flow as a kill brick (see takeDamage()/fallApart()).
+        this.maxHealth = 100;
+        this.health = this.maxHealth;
 
         // Debug/Dev
         this.forcedAnim = null;
@@ -670,6 +684,43 @@ export class Player {
                 undefined,
                 (err) => console.warn('Failed to load Devdex catalog item image for hat:', err),
             );
+        } else if (hatData.type === 'model' && hatData.data) {
+            // A real .glb worn as a hat (see the U-key hat picker in main.js). hatData.data
+            // is a base64 string (from a bundled/uploaded file) or a raw ArrayBuffer (used
+            // right after picking a file, before it's been base64-encoded for
+            // saving/networking) - GLTFLoader.parse() accepts either.
+            const loader = new GLTFLoader();
+            const buffer = (typeof hatData.data === 'string') ? base64ToArrayBufferGlobal(hatData.data) : hatData.data;
+            loader.parse(buffer, '', (gltf) => {
+                const model = gltf.scene || gltf.scenes[0];
+                model.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+
+                // Normalize scale: hats can come from wildly different modeling scales
+                // (some export at 1 unit = 1cm, others 1 unit = 1m), so auto-fit to a
+                // consistent, head-sized bounding box instead of hard-coding one scale
+                // factor that would make some hats tiny and others enormous.
+                const box = new THREE.Box3().setFromObject(model);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                const maxDim = Math.max(size.x, size.y, size.z) || 1;
+                const targetSize = hatData.size || 1.6; // roughly head-width, in world studs
+                const fitScale = targetSize / maxDim;
+                model.scale.setScalar(fitScale);
+
+                // Re-measure after scaling and shift so the model's own bottom sits at its
+                // local origin - otherwise a model authored with its origin at its center
+                // (rather than its base) would spawn half-buried in/floating off the head.
+                const box2 = new THREE.Box3().setFromObject(model);
+                model.position.y -= box2.min.y;
+
+                hatGroup.add(model);
+                // If this hat is still the equipped one by the time loading finishes (it's
+                // async - the player could have switched hats again in the meantime),
+                // refresh the visible group reference.
+                if (this._hat === hatGroup) this._hat = hatGroup;
+            }, (err) => {
+                console.warn('Failed to load GLB hat model:', err);
+            });
         } else if (hatData.constructed && hatData.parts && hatData.parts.length > 0) {
             // Load custom composed hat
             hatData.parts.forEach((p) => {
@@ -991,6 +1042,19 @@ export class Player {
         }
     }
 
+    // Reduces health by `amount` (weapon hits) and ragdolls/respawns the player once it
+    // reaches 0, exactly like touching a kill brick. Safe to call while already dead/mid-
+    // respawn (no-ops). Returns true if this hit was the killing blow.
+    takeDamage(amount) {
+        if (this.isDead || amount <= 0) return false;
+        this.health = Math.max(0, this.health - amount);
+        if (this.health <= 0) {
+            this.fallApart();
+            return true;
+        }
+        return false;
+    }
+
     fallApart() {
         this.stopDance();
         if (this.isDead) return;
@@ -1048,6 +1112,7 @@ export class Player {
         this.stopDance();
         this.isDead = false;
         this.mesh.visible = true;
+        this.health = this.maxHealth;
         
         // Clear stumble state on respawn
         this.stumbleTimer = 0;
@@ -1459,10 +1524,19 @@ export class Player {
         // Visuals
         this.mesh.position.copy(this.position);
 
-        // Stuck detection: if we are inside a part for more than 12 seconds, teleport up
+        // Push the player straight back out of any block they're overlapping (see
+        // resolveOverlap() above) - runs every frame, so a jump that clips into a block's
+        // underside gets corrected immediately instead of leaving them wedged inside it.
+        if (!this.isDead && !this.vehicle) {
+            this.resolveOverlap(collidables);
+            this.mesh.position.copy(this.position);
+        }
+
+        // Stuck detection: last-resort safety net for the rare case resolveOverlap() can't
+        // find a clean way out (e.g. fully enclosed on every side) - teleport up and out.
         if (!this.isDead && !this.vehicle && this.checkCollision(this.position.x, this.position.y, this.position.z, collidables)) {
             this.stuckTimer += dt;
-            if (this.stuckTimer >= 12) {
+            if (this.stuckTimer >= 2) {
                 this.teleport(this.position.clone().add(new THREE.Vector3(0, 15, 0)));
                 this.stuckTimer = 0;
                 this.chat("Unstuck!");
@@ -1704,6 +1778,75 @@ export class Player {
         }
     }
 
+    // Depenetration: if the player's box ends up overlapping a solid block (most commonly
+    // from jumping up into the underside of a floating block, clipping into a doorway/gap,
+    // or spawning/teleporting into one), push them straight back out - every single frame,
+    // immediately - instead of just freezing movement and leaving them wedged inside it.
+    // Runs multiple passes per call: a single pass only resolves the worst overlap, which
+    // isn't enough when squeezed between TWO blocks (pushing out of one can shove you
+    // straight into the other) - iterating re-checks after each push so it keeps working
+    // through the stack until nothing overlaps anymore (or it gives up after a few tries,
+    // in which case the 12s->2s teleport safety net below is the final fallback).
+    resolveOverlap(collidables) {
+        const EPS = 0.02; // tiny extra nudge so we don't land exactly on the boundary and
+                           // immediately re-trigger next frame from floating-point rounding
+        let resolvedAny = false;
+
+        for (let iter = 0; iter < 6; iter++) {
+            const pBox = new THREE.Box3(
+                new THREE.Vector3(this.position.x - 1.2, this.position.y + 0.6, this.position.z - 1.2),
+                new THREE.Vector3(this.position.x + 1.2, this.position.y + 5.5, this.position.z + 1.2)
+            );
+
+            let worstOverlap = -Infinity;
+            let pushVec = null;
+
+            for (const obj of collidables) {
+                if (obj === this.mesh || obj.parent === this.mesh) continue;
+                if (Math.abs(obj.position.x - this.position.x) > 20 || Math.abs(obj.position.z - this.position.z) > 20) continue;
+
+                const oBox = new THREE.Box3().setFromObject(obj);
+                if (!pBox.intersectsBox(oBox)) continue;
+
+                const overlapX = Math.min(pBox.max.x, oBox.max.x) - Math.max(pBox.min.x, oBox.min.x);
+                const overlapY = Math.min(pBox.max.y, oBox.max.y) - Math.max(pBox.min.y, oBox.min.y);
+                const overlapZ = Math.min(pBox.max.z, oBox.max.z) - Math.max(pBox.min.z, oBox.min.z);
+                if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
+
+                // Per-object minimum-translation axis (the shortest way out of THIS object).
+                const minOverlap = Math.min(overlapX, overlapY, overlapZ);
+                // Across all currently-overlapping objects this pass, resolve whichever one
+                // we're most deeply embedded in first - the most urgent one to escape.
+                if (minOverlap <= worstOverlap) continue;
+                worstOverlap = minOverlap;
+
+                if (minOverlap === overlapY) {
+                    const objCenterY = (oBox.min.y + oBox.max.y) / 2;
+                    const dir = (this.position.y + 2.85) < objCenterY ? -1 : 1;
+                    pushVec = new THREE.Vector3(0, dir * (overlapY + EPS), 0);
+                } else if (minOverlap === overlapX) {
+                    const objCenterX = (oBox.min.x + oBox.max.x) / 2;
+                    const dir = this.position.x < objCenterX ? -1 : 1;
+                    pushVec = new THREE.Vector3(dir * (overlapX + EPS), 0, 0);
+                } else {
+                    const objCenterZ = (oBox.min.z + oBox.max.z) / 2;
+                    const dir = this.position.z < objCenterZ ? -1 : 1;
+                    pushVec = new THREE.Vector3(0, 0, dir * (overlapZ + EPS));
+                }
+            }
+
+            if (!pushVec) break; // nothing overlapping anymore - fully resolved
+
+            this.position.add(pushVec);
+            if (pushVec.y !== 0) this.velocity.y = 0;
+            if (pushVec.x !== 0) this.velocity.x = 0;
+            if (pushVec.z !== 0) this.velocity.z = 0;
+            resolvedAny = true;
+        }
+
+        return resolvedAny;
+    }
+
     checkCollision(x, y, z, collidables) {
         // Player Bounding Box
         // Width 3, Height 5, Depth 1.5 relative to feet (y)
@@ -1925,12 +2068,28 @@ export class Player {
     }
 
     serializeAppearance() {
-        // Return only lightweight metadata for presence (avoid embedding large data URLs)
-        return {
+        // Presence gets re-broadcast in full on every single position/rotation update (many
+        // times a second), so this stays deliberately lightweight: colors and small hats
+        // (image billboard / constructed primitives) are tiny JSON and fine to include here.
+        // Shirt/face textures AND model-based (GLB) hats are full binary/image data that can
+        // be tens-hundreds of KB - repeating those dozens of times a second would be wasteful
+        // and can bog down the P2P connection, so those are sent separately, once, via
+        // broadcastAppearance() in main.js instead (see RemotePlayer.applyAppearance()).
+        const hat = this.appearance.hat;
+        const isHeavyHat = hat && hat.type === 'model';
+        const result = {
             colors: this.appearance.colors || {},
             hasFace: !!this.appearance.faceUrl,
-            hasShirt: !!this.appearance.shirtUrl
+            hasShirt: !!this.appearance.shirtUrl,
+            hasModelHat: !!isHeavyHat
         };
+        // Deliberately OMITTED (not set to null) for model hats: RemotePlayer.applyAppearance
+        // only touches hat state when the payload actually has a 'hat' key at all, so leaving
+        // it out here means a presence update can never stomp on a model hat that arrived
+        // separately via the one-shot broadcast - only an explicit "hat: null" (a real
+        // small-hat removal) does that.
+        if (!isHeavyHat) result.hat = hat || null;
+        return result;
     }
 
     deserializeAppearance(data) {

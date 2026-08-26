@@ -11,7 +11,7 @@
   Those indicate behavior intended to be moved into new files rather than deleted outright.
 */
 import * as THREE from 'three';
-import { createPlayerMesh } from './Player.js';
+import { createPlayerMesh, Player } from './Player.js';
 
 export class RemotePlayer {
     constructor(scene, initialData = {}) {
@@ -32,6 +32,17 @@ export class RemotePlayer {
         this.rightLeg = this.mesh.children[5];
 
         this.addNameTag();
+
+        // Appearance state (colors/hat/face/shirt) - mirrors Player.js's `this.appearance`
+        // shape exactly, since applyAppearance() below reuses Player.prototype's own
+        // createHat/setFaceTexture/setShirtTexture methods (they only ever touch
+        // this.materials/this.mesh/this.head/this.appearance, all of which a RemotePlayer
+        // also has, so there's no need to duplicate that fairly involved logic here).
+        this.appearance = { colors: {}, faceUrl: null, shirtUrl: null, hat: null };
+        this._hat = null;
+        this._hatBillboardPlane = null;
+        this._appliedFaceUrl = null;
+        this._appliedShirtUrl = null;
 
         // State for interpolation
         this.targetPos = new THREE.Vector3();
@@ -197,12 +208,49 @@ export class RemotePlayer {
     }
 
     applyAppearance(app) {
+        if (!app) return;
         if (app.colors) {
             for (const [part, col] of Object.entries(app.colors)) {
                 this.setPartColor(part, col);
             }
         }
-        // Handle textures if implemented (data URLs might be heavy)
+
+        // Hat: small hats (image billboard / constructed primitives) travel in presence
+        // (see Player.serializeAppearance()); large model hats (GLB, see the U-key hat
+        // picker) travel via the one-shot 'appearance' message instead, same reasoning as
+        // shirt/face below. Either path lands here - only touch hat state when the
+        // payload actually says something about it (a shirt/face-only broadcast has no
+        // 'hat' key at all, and must NOT be treated as "remove the hat").
+        if (Object.prototype.hasOwnProperty.call(app, 'hat')) {
+            if (app.hat && JSON.stringify(app.hat) !== JSON.stringify(this.appearance.hat)) {
+                Player.prototype.createHat.call(this, app.hat);
+            } else if (!app.hat && this.appearance.hat) {
+                Player.prototype.removeHat.call(this);
+            }
+        }
+
+        // Face/shirt textures: these arrive via the one-shot 'appearance' room message (see
+        // main.js's broadcastAppearance()), not presence - presence gets re-sent in full on
+        // every single position update, so putting multi-KB image data URLs in there would
+        // mean re-transmitting them dozens of times a second for no reason. Skip re-applying
+        // if it's the exact same URL we already have (avoids redundant texture rebuilds on
+        // every routine presence/appearance ping).
+        if (app.faceUrl && app.faceUrl !== this._appliedFaceUrl) {
+            this._appliedFaceUrl = app.faceUrl;
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => Player.prototype.setFaceTexture.call(this, img, app.faceUrl);
+            img.onerror = () => console.warn('Failed to load a remote player\'s face texture');
+            img.src = app.faceUrl;
+        }
+        if (app.shirtUrl && app.shirtUrl !== this._appliedShirtUrl) {
+            this._appliedShirtUrl = app.shirtUrl;
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => Player.prototype.setShirtTexture.call(this, img, app.shirtUrl);
+            img.onerror = () => console.warn('Failed to load a remote player\'s shirt texture');
+            img.src = app.shirtUrl;
+        }
     }
 
     setBodyVisible(visible) {

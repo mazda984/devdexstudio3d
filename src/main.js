@@ -53,8 +53,29 @@ const room = new WebsimSocket();
 // the link gets the exact bytes back out of the URL - nothing to upload, nothing that can be
 // "down", nothing that can silently fail.
 async function encodeMapForUrl(mapName, saveObj) {
-    const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: saveObj.data });
     const zip = new JSZip();
+
+    // 3D models are by far the biggest thing a map can contain (raw GLB binary, often
+    // several hundred KB+), and they used to be stuffed into the JSON as a base64 string
+    // and THEN the whole JSON got base64'd again for the URL - base64-inside-base64, plus
+    // DEFLATE compressing text-encoded binary (which compresses much worse than the actual
+    // binary bytes do). That's why big models blew straight through the URL size limit.
+    // Fix: pull each model's binary out into its own raw binary entry in the zip (so JSZip
+    // compresses the actual bytes, not a base64 rendering of them), and leave only a short
+    // reference name in the JSON. This alone cuts model overhead by roughly a third, before
+    // compression even factors in.
+    let modelIndex = 0;
+    const dataForJson = (saveObj.data || []).map(entry => {
+        if (entry && entry.type === 'model3d' && entry.props && entry.props.data) {
+            const refName = `model_${modelIndex++}`;
+            zip.file(refName, base64ToArrayBuffer(entry.props.data), { binary: true });
+            const { data, ...restProps } = entry.props;
+            return { ...entry, props: { ...restProps, dataRef: refName } };
+        }
+        return entry;
+    });
+
+    const payload = JSON.stringify({ name: mapName, author: saveObj.author, date: saveObj.date, data: dataForJson });
     zip.file('d', payload);
     // DEFLATE compression keeps the URL as short as reasonably possible.
     const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE', compressionOptions: { level: 9 } });
@@ -77,7 +98,24 @@ async function decodeMapFromUrl(encodedParam) {
     const file = zip.file('d');
     if (!file) throw new Error('Shared link data is malformed (missing inner file).');
     const text = await file.async('string');
-    return JSON.parse(text);
+    const parsed = JSON.parse(text);
+
+    // Reverse the model3d binary-entry trick above: swap each props.dataRef back into a
+    // props.data base64 string, so everything downstream (World.loadFromData/spawnModel3D)
+    // sees exactly the same shape it always has and needs no changes of its own.
+    if (parsed && Array.isArray(parsed.data)) {
+        for (const entry of parsed.data) {
+            if (entry && entry.type === 'model3d' && entry.props && entry.props.dataRef) {
+                const modelFile = zip.file(entry.props.dataRef);
+                if (modelFile) {
+                    entry.props.data = await modelFile.async('base64');
+                }
+                delete entry.props.dataRef;
+            }
+        }
+    }
+
+    return parsed;
 }
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
@@ -263,6 +301,33 @@ menuGroup.position.set(3.5, 1.5, 8);
  // Init Player
 const player = new Player(scene);
 const remotePlayers = {}; // Changed to Object for ID mapping
+let appearanceBroadcastTimer = 0; // throttle for the periodic re-broadcast in updatePlaying()
+
+// Sends the local player's current shirt/face textures (and, if equipped, a model-based
+// GLB hat from the U-key hat picker) to everyone else, once. Kept OUT of the regular
+// presence system on purpose - presence gets rebroadcast in full every single frame (see
+// updatePresence's merge-then-resend-everything design), so putting full image/model data
+// there would mean re-sending it dozens of times a second. A plain one-shot room.send()
+// message is exactly what "tell everyone my shirt/hat is this" needs instead.
+// Called: once right after the initial presence push, periodically (throttled) while
+// playing so it eventually reaches anyone who missed the first shot, and immediately
+// whenever a new player is seen joining (so they don't have to wait for the next tick).
+function broadcastAppearance() {
+    if (!player || !player.appearance) return;
+    const isModelHat = player.appearance.hat && player.appearance.hat.type === 'model';
+    if (!player.appearance.shirtUrl && !player.appearance.faceUrl && !isModelHat) return; // nothing to send
+    try {
+        const payload = {
+            type: 'appearance',
+            shirtUrl: player.appearance.shirtUrl || null,
+            faceUrl: player.appearance.faceUrl || null
+        };
+        // Only include 'hat' for model-type hats - small hats (image/constructed) already
+        // travel via presence, and including them here too would just be redundant traffic.
+        if (isModelHat) payload.hat = player.appearance.hat;
+        room.send(payload);
+    } catch (e) {}
+}
 
 // --- Host-authoritative sync for unanchored (Anchored=false) parts, e.g. a football -------
 // Physics for these parts (gravity, player-push) used to be simulated 100% locally on each
@@ -462,6 +527,10 @@ room.subscribePresence((presence) => {
             });
             remotePlayers[id] = rp;
             addChatMessage("System", `${username} joined.`);
+            // Give them our shirt/face right away rather than waiting for the next
+            // periodic broadcast (see broadcastAppearance()) - they can't have received
+            // any earlier one-shot broadcast since they weren't connected yet.
+            broadcastAppearance();
         }
         
         // Update
@@ -1354,6 +1423,13 @@ const propInputs = {
     rigColor: document.getElementById('prop-rig-color'),
     attachRig: document.getElementById('prop-attach-rig'),
     material: document.getElementById('prop-material'),
+    weaponType: document.getElementById('prop-weapon-type'),
+    textContent: document.getElementById('prop-text-content'),
+    textColor: document.getElementById('prop-text-color'),
+    lightEnabled: document.getElementById('prop-light-enabled'),
+    lightColor: document.getElementById('prop-light-color'),
+    lightIntensity: document.getElementById('prop-light-intensity'),
+    lightDistance: document.getElementById('prop-light-distance'),
 };
 
 // Rebuilds a part's material(s) to match the chosen named material ("plastic"/"wood"/
@@ -1407,6 +1483,11 @@ function updateStudioPropertiesUI() {
         if (propInputs.rx) propInputs.rx.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.x));
         if (propInputs.ry) propInputs.ry.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.y));
         if (propInputs.rz) propInputs.rz.value = Math.round(THREE.MathUtils.radToDeg(m.rotation.z));
+        if (m.userData.isWeaponPickup) {
+            const wSection = document.getElementById('prop-section-weapon');
+            if (wSection) wSection.style.display = '';
+            if (propInputs.weaponType) propInputs.weaponType.value = m.userData.weaponType || 'rocketlauncher';
+        }
         if (m.userData.isRig || m.userData.isWeaponPickup) return; // no anchor/weld UI needed for these
 
         // Imported 3D models CAN be anchored and welded to a RigBot, same as normal parts.
@@ -1425,6 +1506,8 @@ function updateStudioPropertiesUI() {
         return;
     } else if (rigSection) {
         rigSection.style.display = 'none';
+        const wSection = document.getElementById('prop-section-weapon');
+        if (wSection) wSection.style.display = 'none';
     }
     
     // SAFETY: ensure material exists before reading properties
@@ -1449,13 +1532,39 @@ function updateStudioPropertiesUI() {
     const mat = Array.isArray(m.material) ? m.material[0] : m.material;
     if (mat && mat.color) propInputs.color.value = '#' + (mat.color ? mat.color.getHexString() : 'cccccc');
     else if (propInputs.color) propInputs.color.value = '#cccccc';
+    const isTextBlock = !!(m.userData && m.userData.serial && m.userData.serial.type === 'text_block');
     if (propInputs.material) {
         const matRow = propInputs.material.closest('.prop-row');
         // Material only applies to plain parts (block/sphere/cylinder/wedge) - RigBots/
-        // models/weapons already returned earlier above, so anything reaching here qualifies.
-        const applicable = !!(m.userData && m.userData.serial && m.userData.serial.type);
+        // models/weapons already returned earlier above, and Text Blocks have their own
+        // fixed glass material (switching it would blow away the text texture), so exclude
+        // those too.
+        const applicable = !!(m.userData && m.userData.serial && m.userData.serial.type) && !isTextBlock;
         if (matRow) matRow.style.display = applicable ? '' : 'none';
         propInputs.material.value = (m.userData && m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
+    }
+    const textSection = document.getElementById('prop-section-text');
+    if (textSection) {
+        textSection.style.display = isTextBlock ? '' : 'none';
+        if (isTextBlock) {
+            const props = m.userData.serial.props || {};
+            if (propInputs.textContent) propInputs.textContent.value = props.text || '';
+            if (propInputs.textColor) propInputs.textColor.value = '#' + new THREE.Color(props.textColor ?? 0x000000).getHexString();
+        }
+    }
+    // Light: available on any plain part (block/sphere/cylinder/wedge/text_block) - lets a
+    // block act as a real light source (lamps, house lighting, etc.), not just visually lit.
+    const lightSection = document.getElementById('prop-section-light');
+    if (lightSection) {
+        const lightApplicable = !!(m.userData && m.userData.serial && m.userData.serial.type);
+        lightSection.style.display = lightApplicable ? '' : 'none';
+        if (lightApplicable) {
+            const lightProps = (m.userData.serial.props && m.userData.serial.props.light) || null;
+            if (propInputs.lightEnabled) propInputs.lightEnabled.checked = !!(lightProps && lightProps.enabled);
+            if (propInputs.lightColor) propInputs.lightColor.value = '#' + new THREE.Color((lightProps && lightProps.color) ?? 0xffffaa).getHexString();
+            if (propInputs.lightIntensity) propInputs.lightIntensity.value = (lightProps && lightProps.intensity !== undefined) ? lightProps.intensity : 1.2;
+            if (propInputs.lightDistance) propInputs.lightDistance.value = (lightProps && lightProps.distance !== undefined) ? lightProps.distance : 12;
+        }
     }
     // Assuming Standard Material props, though our blocks use array
     if (mat) {
@@ -1542,7 +1651,24 @@ const onPropChange = () => {
     );
 
     if (m.userData && m.userData.isWeaponPickup) {
-        // Just a plain Group - position/rotation (already applied above) is all that applies.
+        // Just a plain Group - position/rotation (already applied above) is all that applies,
+        // EXCEPT for the weapon Type dropdown: switching it rebuilds the pickup as a
+        // different weapon model in place (rocket launcher <-> sword), since the two use
+        // completely different geometry, not just a material/color swap.
+        if (propInputs.weaponType && propInputs.weaponType.value !== m.userData.weaponType) {
+            const newType = propInputs.weaponType.value;
+            const pos = m.position.clone();
+            const rot = m.rotation.clone();
+            const name = m.name;
+            world.removePart(m);
+            const newPickup = world.createWeaponPickup(pos.x, pos.y, pos.z, newType);
+            newPickup.rotation.copy(rot);
+            if (name) newPickup.name = name;
+            studioSelected = newPickup;
+            transformControl.detach();
+            transformControl.attach(newPickup);
+            updateExplorer();
+        }
         return;
     }
     if (m.userData && m.userData.isRig) {
@@ -1604,13 +1730,34 @@ const onPropChange = () => {
     }
 
     // Material (must run before the Colors block below so the freshly-rebuilt material
-    // still picks up whatever color is currently in the color picker).
-    if (propInputs.material) {
+    // still picks up whatever color is currently in the color picker). Skipped for Text
+    // Blocks - they keep their own fixed glass material (see createTextBlock).
+    if (propInputs.material && (!m.userData.serial || m.userData.serial.type !== 'text_block')) {
         const wantedMat = propInputs.material.value;
         const currentMat = (m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
         if (wantedMat !== currentMat) {
             applyPartMaterial(m, wantedMat);
         }
+    }
+
+    // Text Block content: redraw the canvas texture whenever the Content/Text Color fields
+    // change, so what's written in Properties is exactly what shows up on the block.
+    if (m.userData.serial && m.userData.serial.type === 'text_block' && typeof world.updateTextBlockContent === 'function') {
+        const newText = propInputs.textContent ? propInputs.textContent.value : ((m.userData.serial.props && m.userData.serial.props.text) || '');
+        const newColorHex = propInputs.textColor ? new THREE.Color(propInputs.textColor.value).getHex() : undefined;
+        world.updateTextBlockContent(m, newText, newColorHex);
+    }
+
+    // Light: apply/update/remove a real PointLight on this part whenever the Light section's
+    // fields change - lets blocks act as actual light sources (lamps, house lighting, etc.)
+    // that are saved with the map and show up when Published/Played, not just visually here.
+    if (m.userData.serial && typeof world.applyPartLight === 'function' && propInputs.lightEnabled) {
+        world.applyPartLight(m, {
+            enabled: propInputs.lightEnabled.checked,
+            color: propInputs.lightColor ? new THREE.Color(propInputs.lightColor.value).getHex() : 0xffffaa,
+            intensity: propInputs.lightIntensity ? parseFloat(propInputs.lightIntensity.value) : 1.2,
+            distance: propInputs.lightDistance ? parseFloat(propInputs.lightDistance.value) : 12
+        });
     }
 
     // Colors
@@ -1747,28 +1894,20 @@ document.getElementById('tool-publish').onclick = async () => {
             const MAX_URL_DATA_LENGTH = 100000;
 
             // Carry the Devdex-equipped-avatar params (if this session was opened
-            // from Devdex with an equipped catalog item) into the published link,
-            // so the item still shows up for anyone who opens it later.
-            const publishDevdexExtra = new URLSearchParams();
-            try {
-                const curParams = new URLSearchParams(window.location.search);
-                ['devdexItemImage', 'devdexItemType', 'devdexUsername'].forEach((key) => {
-                    const val = curParams.get(key);
-                    if (val) publishDevdexExtra.set(key, val);
-                });
-            } catch (e) {}
-            const publishDevdexSuffix = publishDevdexExtra.toString() ? `&${publishDevdexExtra.toString()}` : '';
-
             if (encodedData && encodedData.length <= MAX_URL_DATA_LENGTH) {
                 // Self-contained shareable link: the map itself lives in the URL, so this
                 // works for ANYONE who opens it, with no server/service dependency at all.
-                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${encodedData}${publishDevdexSuffix}`;
+                // (Deliberately NOT carrying over devdexItemImage/devdexItemType/
+                // devdexUsername here - those describe whatever catalog item happened to be
+                // equipped on the Devdex site in THIS browser tab, not anything about the
+                // map itself, so they don't belong in a link meant to be shared/republished.)
+                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${encodedData}`;
             } else {
                 if (encodedData) {
                     console.warn(`Map is too large to embed in a URL (${Math.round(encodedData.length/1024)}KB, limit ~${Math.round(MAX_URL_DATA_LENGTH/1024)}KB) - falling back to a local-only link.`);
                 }
                 // Local-only fallback link (only opens correctly in this same browser).
-                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${id}${publishDevdexSuffix}`;
+                playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${id}`;
             }
 
             try {
@@ -2310,6 +2449,15 @@ document.getElementById('tool-weapon').onclick = () => {
     updateExplorer();
 };
 
+document.getElementById('tool-textblock').onclick = () => {
+    playSwitch();
+    const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -6).applyQuaternion(camera.quaternion));
+    const textBlock = world.createTextBlock(pos.x, pos.y, pos.z, 'Text');
+    studioSelected = textBlock;
+    updateStudioSelection();
+    updateExplorer();
+};
+
 document.getElementById('tool-model').onclick = () => {
     playSwitch();
     document.getElementById('model-file-input').click();
@@ -2317,6 +2465,13 @@ document.getElementById('tool-model').onclick = () => {
 document.getElementById('model-file-input').addEventListener('change', (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
+    // Heads-up at import time rather than only discovering it when Publish fails: models
+    // are embedded directly in the shareable link (this static site has no server/database
+    // of its own to upload them to), so very large ones can still make the link too long
+    // to share even after compression.
+    if (file.size > 2 * 1024 * 1024) {
+        addChatMessage('System', `"${file.name}" is ${Math.round(file.size / 1024 / 1024 * 10) / 10}MB - large models can make the Publish link too long to share. Consider a lower-poly model or compressed textures if sharing fails.`);
+    }
     const reader = new FileReader();
     reader.onload = () => spawnModel3D(null, reader.result, file.name);
     reader.onerror = () => addChatMessage('System', `Couldn't read "${file.name}".`);
@@ -2324,30 +2479,244 @@ document.getElementById('model-file-input').addEventListener('change', (e) => {
     e.target.value = ''; // allow re-selecting the same file later
 });
 
-// --- Rocket Launcher weapon: pickup/equip, firing, and explosion knockback ---
-let hasRocketLauncher = false;
+// --- Weapons: pickup/equip (persists in a 1-slot inventory HUD), firing/attacking, and
+// dealing real damage to players (local + networked) -----------------------------------
+let equippedWeapon = null; // null | 'rocketlauncher' | 'sword'
 let nearbyWeaponPickup = null;
 let lastRocketFireTime = 0;
+let lastSwordSwingTime = 0;
 const ROCKET_FIRE_COOLDOWN = 800; // ms
+const SWORD_SWING_COOLDOWN = 500; // ms
+const ROCKET_DAMAGE = 60; // at ground zero, falls off with distance like the knockback does
+const SWORD_DAMAGE = 20;
+const SWORD_RANGE = 3.2;
 const activeRockets = []; // { mesh, velocity, spawnTime }
+
+const WEAPON_INFO = {
+    rocketlauncher: { label: 'Rocket Launcher', icon: '🚀', hint: 'Press E to pick up Rocket Launcher', equippedText: 'Rocket Launcher (Click to fire)' },
+    sword: { label: 'Sword', icon: '🗡️', hint: 'Press E to pick up Sword', equippedText: 'Sword (Click to swing)' }
+};
 
 // Small on-screen hint, created once and reused (kept out of index.html since it's purely
 // a runtime prompt, not part of the game's static layout).
 const weaponHint = document.createElement('div');
 weaponHint.style.cssText = 'position:fixed; bottom:120px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.7); color:#fff; padding:6px 14px; border-radius:4px; font-size:14px; font-family:sans-serif; display:none; z-index:900; pointer-events:none;';
-weaponHint.textContent = 'Press E to pick up Rocket Launcher';
 document.body.appendChild(weaponHint);
 
+// Inventory slot: a single persistent slot showing whatever weapon is currently equipped.
+// Unlike the old plain text label, this stays on screen and visually represents "you are
+// holding this" the whole time you have it - not just a transient toast.
+const weaponInventorySlot = document.createElement('div');
+weaponInventorySlot.style.cssText = 'position:fixed; bottom:20px; right:20px; width:56px; height:56px; background:rgba(0,0,0,0.55); border:2px solid rgba(255,255,255,0.25); border-radius:8px; display:none; align-items:center; justify-content:center; flex-direction:column; z-index:900; pointer-events:none; font-family:sans-serif;';
+weaponInventorySlot.innerHTML = '<div id="weapon-slot-icon" style="font-size:22px; line-height:1;"></div>';
+document.body.appendChild(weaponInventorySlot);
+const weaponSlotIcon = weaponInventorySlot.querySelector('#weapon-slot-icon');
+
 const weaponEquippedLabel = document.createElement('div');
-weaponEquippedLabel.style.cssText = 'position:fixed; bottom:20px; right:20px; background:rgba(0,0,0,0.6); color:#ff6a3d; padding:6px 12px; border-radius:4px; font-size:13px; font-family:sans-serif; font-weight:bold; display:none; z-index:900; pointer-events:none;';
-weaponEquippedLabel.textContent = '🚀 Rocket Launcher (Click to fire)';
+weaponEquippedLabel.style.cssText = 'position:fixed; bottom:82px; right:20px; background:rgba(0,0,0,0.6); color:#ff6a3d; padding:6px 12px; border-radius:4px; font-size:13px; font-family:sans-serif; font-weight:bold; display:none; z-index:900; pointer-events:none; white-space:nowrap;';
 document.body.appendChild(weaponEquippedLabel);
+
+// Health bar: shows the local player's HP, updated every frame from player.health.
+// Weapons are the only thing that drain it right now (rocket splash / sword hits).
+const healthBarWrap = document.createElement('div');
+healthBarWrap.style.cssText = 'position:fixed; bottom:20px; left:20px; width:180px; height:22px; background:rgba(0,0,0,0.5); border:2px solid rgba(255,255,255,0.25); border-radius:5px; display:none; z-index:900; pointer-events:none; overflow:hidden;';
+healthBarWrap.innerHTML = '<div id="health-bar-fill" style="height:100%; width:100%; background:linear-gradient(90deg,#e74c3c,#ff6b6b); transition:width 0.15s ease;"></div>' +
+    '<div id="health-bar-text" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font:bold 12px sans-serif; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.8);"></div>';
+healthBarWrap.style.position = 'fixed';
+document.body.appendChild(healthBarWrap);
+const healthBarFill = healthBarWrap.querySelector('#health-bar-fill');
+const healthBarText = healthBarWrap.querySelector('#health-bar-text');
+
+// Updates the HP bar from player.health, called every frame during PLAYING/TEST.
+function updateHealthHUD() {
+    const show = (gameState === 'PLAYING' || gameState === 'TEST') && !player.isDead;
+    healthBarWrap.style.display = show ? 'block' : 'none';
+    if (!show) return;
+    const pct = Math.max(0, Math.min(100, (player.health / player.maxHealth) * 100));
+    healthBarFill.style.width = pct + '%';
+    healthBarText.textContent = `${Math.ceil(player.health)} / ${player.maxHealth}`;
+}
+
+// --- Hat Picker (press U): equip a real .glb model as a hat --------------------------
+// Bundled defaults ship with the game; players can also add more from their own .glb
+// files or a .zip full of them, for the current session (not saved into the map itself -
+// this is a per-player avatar accessory, same category as shirt/face/hat color).
+const BUNDLED_HATS = [
+    { name: 'Gold Dominus', url: './hats/gold_dominus_hat.glb' },
+    { name: 'Doge Hat', url: './hats/roblox_doge_hat.glb' },
+];
+const uploadedHats = []; // { name, data: base64 } - added this session via the Upload button
+
+const hatPicker = document.createElement('div');
+hatPicker.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1200; display:none; align-items:center; justify-content:center; font-family:sans-serif;';
+hatPicker.innerHTML = `
+    <div style="background:#1e1e1e; color:#fff; border-radius:10px; padding:20px; width:420px; max-width:90vw; max-height:80vh; display:flex; flex-direction:column; gap:12px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:0; font-size:16px;">🎩 Choose a Hat</h3>
+            <button id="hat-picker-close" style="background:none; border:none; color:#aaa; font-size:20px; cursor:pointer; line-height:1;">×</button>
+        </div>
+        <div id="hat-picker-grid" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; overflow-y:auto; max-height:320px; padding:2px;"></div>
+        <div style="display:flex; gap:8px; border-top:1px solid #3a3a3a; padding-top:12px;">
+            <button id="hat-picker-remove" style="flex:1; padding:8px; background:#3a3a3a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Remove Hat</button>
+            <button id="hat-picker-upload-btn" style="flex:1; padding:8px; background:#3d7de0; color:#fff; border:none; border-radius:6px; cursor:pointer;">Upload .glb/.zip</button>
+        </div>
+        <input type="file" id="hat-picker-upload-input" accept=".glb,.zip" multiple style="display:none">
+    </div>
+`;
+document.body.appendChild(hatPicker);
+const hatPickerGrid = hatPicker.querySelector('#hat-picker-grid');
+
+function renderHatPickerGrid() {
+    hatPickerGrid.innerHTML = '';
+    const allHats = [...BUNDLED_HATS, ...uploadedHats];
+    allHats.forEach((hat) => {
+        const btn = document.createElement('button');
+        const isEquipped = player.appearance && player.appearance.hat && player.appearance.hat.name === hat.name && player.appearance.hat.type === 'model';
+        btn.style.cssText = `display:flex; flex-direction:column; align-items:center; gap:6px; padding:10px 6px; background:${isEquipped ? '#3d7de0' : '#2a2a2a'}; border:1px solid ${isEquipped ? '#5a9bff' : '#3a3a3a'}; border-radius:8px; color:#fff; cursor:pointer; font-size:12px;`;
+        btn.innerHTML = `<div style="font-size:26px;">🎩</div><div style="text-align:center; word-break:break-word;">${hat.name}</div>`;
+        btn.onclick = () => equipHat(hat);
+        hatPickerGrid.appendChild(btn);
+    });
+    if (allHats.length === 0) {
+        hatPickerGrid.innerHTML = '<div style="grid-column:1/-1; color:#888; text-align:center; padding:20px 0;">No hats yet - upload a .glb or .zip below.</div>';
+    }
+}
+
+// Equips `hat` ({name, url} for bundled, or {name, data:base64} for uploaded) as a GLB
+// model hat: fetches/reads it into base64 if needed, applies it via Player.createHat,
+// persists it locally, and tells other players about it (see broadcastAppearance()).
+async function equipHat(hat) {
+    try {
+        let base64 = hat.data;
+        if (!base64 && hat.url) {
+            const resp = await fetch(hat.url);
+            if (!resp.ok) throw new Error(`Fetch failed: ${resp.status} ${resp.statusText}`);
+            const buffer = await resp.arrayBuffer();
+            base64 = arrayBufferToBase64(buffer);
+        }
+        if (!base64) return;
+
+        const hatData = { type: 'model', name: hat.name, data: base64, size: 1.6 };
+        player.createHat(hatData);
+
+        // Saving locally is a nice-to-have, not something that should block the equip
+        // itself: base64 GLB data can be a few hundred KB, and on top of any maps already
+        // saved in localStorage that can trip the browser's per-origin storage quota. If
+        // it fails, the hat should still visibly equip and sync to other players below -
+        // previously a quota error here aborted BEFORE those two steps, so the hat would
+        // silently equip on your own screen but never show as "selected" in the picker and
+        // never reach anyone else, while reporting a misleading "file may be corrupted".
+        try {
+            const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
+            save.hat = hatData;
+            localStorage.setItem('nblox_appearance', JSON.stringify(save));
+        } catch (storageErr) {
+            console.warn('Could not save hat choice locally (equipped anyway):', storageErr);
+        }
+
+        broadcastAppearance();
+        renderHatPickerGrid();
+        addChatMessage('System', `Equipped "${hat.name}" hat!`);
+    } catch (e) {
+        console.error('Failed to equip hat:', e);
+        addChatMessage('System', `Couldn't equip "${hat.name}": ${e.message || 'unknown error'}. Check the browser console (F12) for details.`);
+    }
+}
+
+function removeEquippedHat() {
+    player.removeHat();
+    player.appearance.hat = null;
+    try {
+        const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
+        save.hat = null;
+        localStorage.setItem('nblox_appearance', JSON.stringify(save));
+    } catch (storageErr) {
+        console.warn('Could not save hat removal locally:', storageErr);
+    }
+    broadcastAppearance();
+    renderHatPickerGrid();
+}
+
+function openHatPicker() {
+    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    renderHatPickerGrid();
+    hatPicker.style.display = 'flex';
+    if (document.pointerLockElement) document.exitPointerLock();
+}
+function closeHatPicker() {
+    hatPicker.style.display = 'none';
+    if ((gameState === 'PLAYING' || gameState === 'TEST') && !document.pointerLockElement) {
+        renderer.domElement.requestPointerLock().catch(() => {});
+    }
+}
+hatPicker.querySelector('#hat-picker-close').onclick = closeHatPicker;
+hatPicker.querySelector('#hat-picker-remove').onclick = removeEquippedHat;
+hatPicker.addEventListener('click', (e) => { if (e.target === hatPicker) closeHatPicker(); });
+
+const hatUploadInput = hatPicker.querySelector('#hat-picker-upload-input');
+hatPicker.querySelector('#hat-picker-upload-btn').onclick = () => hatUploadInput.click();
+hatUploadInput.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    for (const file of files) {
+        try {
+            if (file.name.toLowerCase().endsWith('.zip')) {
+                // A zip of multiple .glb hats: add every .glb entry inside as its own option.
+                const buffer = await file.arrayBuffer();
+                const zip = await JSZip.loadAsync(buffer);
+                const glbEntries = Object.values(zip.files).filter(f => !f.dir && f.name.toLowerCase().endsWith('.glb'));
+                for (const entry of glbEntries) {
+                    const data = await entry.async('base64');
+                    const name = entry.name.split('/').pop().replace(/\.glb$/i, '');
+                    uploadedHats.push({ name, data });
+                }
+                if (glbEntries.length === 0) {
+                    addChatMessage('System', `"${file.name}" doesn't contain any .glb files.`);
+                }
+            } else if (file.name.toLowerCase().endsWith('.glb')) {
+                const buffer = await file.arrayBuffer();
+                const data = arrayBufferToBase64(buffer);
+                uploadedHats.push({ name: file.name.replace(/\.glb$/i, ''), data });
+            }
+        } catch (err) {
+            console.warn(`Failed to read "${file.name}":`, err);
+            addChatMessage('System', `Couldn't read "${file.name}".`);
+        }
+    }
+    renderHatPickerGrid();
+    e.target.value = '';
+});
+
+window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() !== 'u') return;
+    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    e.preventDefault();
+    if (hatPicker.style.display === 'flex') closeHatPicker();
+    else openHatPicker();
+});
+
+// Deals damage to whoever is at `targetId` (a room clientId): applies it directly if that's
+// us, otherwise sends a network message so the actual owner of that player applies it to
+// their own health (client-authoritative: the attacker decides a hit landed, the victim's
+// own client is what actually reduces their HP and ragdolls them).
+function dealDamageToClient(targetId, amount) {
+    if (!targetId) return;
+    if (room && targetId === room.clientId) {
+        player.takeDamage(amount);
+        return;
+    }
+    try {
+        room.send({ type: 'weapon_hit', targetId, damage: amount });
+    } catch (e) {}
+}
 
 // Explosion knockback: any Anchored=false part/model within `radius` of `center` gets
 // launched away, harder the closer it was to the blast. This is the whole point of the
 // Anchored system paying off - anchored blocks are unaffected and don't move, exactly
 // like blast physics in Roblox-style games.
-function explodeAt(center, radius = 14, force = 55) {
+// Also deals real damage: anyone (local player or a remote player) standing within
+// `radius` takes damage that falls off with distance, same curve as the knockback.
+function explodeAt(center, radius = 14, force = 55, damage = 0) {
     if (world.dynamicObjects) {
         world.dynamicObjects.forEach(part => {
             const objCenter = new THREE.Box3().setFromObject(part).getCenter(new THREE.Vector3());
@@ -2366,6 +2735,28 @@ function explodeAt(center, radius = 14, force = 55) {
             }
         });
     }
+
+    if (damage > 0) {
+        // Local player (skip if we're the one who fired it and it hit exactly where we
+        // are... normal splash range makes self-damage possible, matching most shooters).
+        const localDist = player.mesh.position.distanceTo(center);
+        if (localDist < radius && !player.isDead) {
+            const dmg = damage * (1 - localDist / radius);
+            if (dmg > 0.5) player.takeDamage(dmg);
+        }
+        // Remote players: we (the one who fired) decide the hit and tell their owning
+        // client to apply it - see dealDamageToClient().
+        for (const id in remotePlayers) {
+            const rp = remotePlayers[id];
+            if (!rp || !rp.mesh) continue;
+            const dist = rp.mesh.position.distanceTo(center);
+            if (dist < radius) {
+                const dmg = damage * (1 - dist / radius);
+                if (dmg > 0.5) dealDamageToClient(id, dmg);
+            }
+        }
+    }
+
     spawnExplosionVFX(center);
 }
 
@@ -2424,7 +2815,7 @@ function updateRockets(dt) {
         const timedOut = performance.now() - r.spawnTime > 4000; // 4s max lifetime
         if ((hits.length > 0 && hits[0].distance <= moveDist) || timedOut) {
             const hitPoint = (hits.length > 0) ? hits[0].point : r.mesh.position.clone();
-            explodeAt(hitPoint, 14, 55);
+            explodeAt(hitPoint, 14, 55, ROCKET_DAMAGE);
             scene.remove(r.mesh);
             r.mesh.geometry.dispose();
             r.mesh.material.dispose();
@@ -2435,10 +2826,65 @@ function updateRockets(dt) {
     }
 }
 
+// Sword melee: a short-range hit-check directly in front of the camera, on click while a
+// Sword is equipped. Unlike the rocket, there's no projectile to track - it's an instant
+// "is anyone within SWORD_RANGE and roughly in front of me" check the moment you swing.
+function swingSword() {
+    const now = performance.now();
+    if (now - lastSwordSwingTime < SWORD_SWING_COOLDOWN) return;
+    lastSwordSwingTime = now;
+
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    dir.y = 0;
+    if (dir.lengthSq() > 0.0001) dir.normalize();
+
+    let hitSomeone = false;
+    for (const id in remotePlayers) {
+        const rp = remotePlayers[id];
+        if (!rp || !rp.mesh) continue;
+        const toTarget = new THREE.Vector3().subVectors(rp.mesh.position, player.mesh.position);
+        const dist = toTarget.length();
+        if (dist > SWORD_RANGE) continue;
+        toTarget.y = 0;
+        if (toTarget.lengthSq() > 0.0001) {
+            toTarget.normalize();
+            // Roughly in front of us (within ~60 degrees of where we're looking).
+            if (dir.dot(toTarget) < 0.5) continue;
+        }
+        dealDamageToClient(id, SWORD_DAMAGE);
+        hitSomeone = true;
+    }
+
+    // Simple swing feedback: a brief arc-flash in front of the player so a hit/miss both
+    // feel like something happened, without needing a full arm-swing animation rig.
+    const swingMesh = new THREE.Mesh(
+        new THREE.RingGeometry(0.9, 1.15, 12, 1, 0, Math.PI * 0.7),
+        new THREE.MeshBasicMaterial({ color: hitSomeone ? 0xff3b3b : 0xdddddd, transparent: true, opacity: 0.8, side: THREE.DoubleSide })
+    );
+    const swingStart = camera.position.clone().addScaledVector(dir, 1.4);
+    swingMesh.position.copy(swingStart);
+    swingMesh.lookAt(camera.position);
+    scene.add(swingMesh);
+    const swingStartTime = performance.now();
+    const animSwing = () => {
+        const t = (performance.now() - swingStartTime) / 180;
+        if (t >= 1) { scene.remove(swingMesh); swingMesh.geometry.dispose(); swingMesh.material.dispose(); return; }
+        swingMesh.rotation.z = t * Math.PI * 0.6;
+        swingMesh.material.opacity = 0.8 * (1 - t);
+        requestAnimationFrame(animSwing);
+    };
+    animSwing();
+    playSwitch();
+}
+
 // Called every frame from updatePlaying(): pickup proximity check ('E' to equip) + firing input.
 function updateWeaponSystem(dt) {
-    // Proximity check for un-equipped pickups
-    if (!hasRocketLauncher) {
+    // Proximity check for un-equipped pickups. Only one weapon slot exists (matching the
+    // single inventory HUD slot), so nothing new can be picked up while already holding one -
+    // this is also what makes the equipped weapon "stay" as requested: nothing ever silently
+    // swaps it out or drops it, it just stays equipped until the session ends.
+    if (!equippedWeapon) {
         let closest = null, closestDist = 3.5; // pickup radius
         world.items.forEach(o => {
             if (o.userData && o.userData.isWeaponPickup && !o.userData.collected) {
@@ -2447,15 +2893,25 @@ function updateWeaponSystem(dt) {
             }
         });
         nearbyWeaponPickup = closest;
+        const info = closest ? (WEAPON_INFO[closest.userData.weaponType] || WEAPON_INFO.rocketlauncher) : null;
+        weaponHint.textContent = info ? info.hint : '';
         weaponHint.style.display = closest ? 'block' : 'none';
 
         if (closest && input.keys.e && !weaponSystemState.eWasDown) {
-            hasRocketLauncher = true;
-            closest.visible = false;
-            closest.userData.collected = true;
+            const weaponType = closest.userData.weaponType || 'rocketlauncher';
+            equippedWeapon = weaponType;
+            // Deliberately NOT hiding/marking the pickup as collected: it stays right there in
+            // the world afterward, exactly like a weapon rack/spawner, so anyone else (or you,
+            // next time you die and lose your equip) can walk up and grab one from the same
+            // spot too - it's not a one-time pickup that disappears.
             weaponHint.style.display = 'none';
+
+            const eqInfo = WEAPON_INFO[weaponType] || WEAPON_INFO.rocketlauncher;
+            weaponSlotIcon.textContent = eqInfo.icon;
+            weaponInventorySlot.style.display = 'flex';
+            weaponEquippedLabel.textContent = eqInfo.icon + ' ' + eqInfo.equippedText;
             weaponEquippedLabel.style.display = 'block';
-            addChatMessage('System', 'Equipped Rocket Launcher! Click to fire.');
+            addChatMessage('System', `Equipped ${eqInfo.label}! Click to ${weaponType === 'sword' ? 'swing' : 'fire'}.`);
         }
     }
     weaponSystemState.eWasDown = !!input.keys.e;
@@ -2467,10 +2923,11 @@ const weaponSystemState = { eWasDown: false };
 // Clears all weapon state - called whenever a PLAYING/TEST session starts or stops, so
 // nothing lingers (equipped weapon, in-flight rockets, HUD hints) between sessions.
 function resetWeaponState() {
-    hasRocketLauncher = false;
+    equippedWeapon = null;
     nearbyWeaponPickup = null;
     weaponHint.style.display = 'none';
     weaponEquippedLabel.style.display = 'none';
+    weaponInventorySlot.style.display = 'none';
     // Bring back any pickup that was collected this session, exactly where it was placed.
     world.items.forEach(o => {
         if (o.userData && o.userData.isWeaponPickup && o.userData.collected) {
@@ -2487,14 +2944,16 @@ function resetWeaponState() {
 }
 
 
-// Firing input: left-click while equipped (only once pointer is locked, so this doesn't
-// hijack the very first click that requests pointer lock).
+// Firing/attack input: left-click while equipped (only once pointer is locked, so this
+// doesn't hijack the very first click that requests pointer lock). Branches by weapon type -
+// a Rocket Launcher fires a projectile, a Sword does an instant close-range hit-check.
 window.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
     if (!document.pointerLockElement) return;
-    if (!hasRocketLauncher) return;
-    fireRocket();
+    if (!equippedWeapon) return;
+    if (equippedWeapon === 'sword') swingSword();
+    else fireRocket();
 });
 
 
@@ -2873,6 +3332,26 @@ async function spawnRig(savedData = null) {
     return rigMesh;
 }
 
+// Applies world.lighting.brightness (0 = near-pitch-black night, 1 = full bright day) to the
+// actual scene lights, so what's set here is what actually shows up whether you're editing
+// in Studio or really playing/testing the map - unlike the old binary Day/Night toggle,
+// which only ever affected the Studio editing view and was never saved or reapplied at Play.
+let lastAppliedBrightness = null; // tracks what applyWorldLighting() last saw, see animate()
+
+function applyWorldLighting(brightness) {
+    const b = Math.max(0, Math.min(1, brightness ?? 0.75));
+    ambient.intensity = 0.08 + b * 0.62;
+    ambient.color.set(b < 0.35 ? 0x8fa5c9 : 0xffffff); // cool tint as it gets darker
+    sun.intensity = b * 0.9;
+    sun.visible = b > 0.05;
+    if (b < 0.3) {
+        // Blend the sky toward black as it gets dark, rather than an abrupt cutover.
+        scene.background = new THREE.Color(0x05070c).lerp(new THREE.Color(0x141a26), b / 0.3);
+    } else {
+        scene.background = null; // let the skybox mesh show through
+    }
+}
+
 // Toggle Studio Day/Night state
 let studioIsDay = true;
 function setStudioDayNight(isDay) {
@@ -2905,10 +3384,100 @@ function setStudioDayNight(isDay) {
     }
 }
 
+// --- Day/Night brightness panel: replaces the old binary Day/Night button with an
+// adjustable slider whose value is actually saved on the map (world.lighting.brightness)
+// and applied at real Play/Test time too, not just while editing in Studio. ---
+const lightingPanel = document.createElement('div');
+lightingPanel.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1200; display:none; align-items:center; justify-content:center; font-family:sans-serif;';
+lightingPanel.innerHTML = `
+    <div style="background:#1e1e1e; color:#fff; border-radius:10px; padding:20px; width:320px; max-width:90vw; display:flex; flex-direction:column; gap:14px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:0; font-size:16px;">🌗 Day / Night</h3>
+            <button id="lighting-panel-close" style="background:none; border:none; color:#aaa; font-size:20px; cursor:pointer; line-height:1;">×</button>
+        </div>
+        <div>
+            <div style="display:flex; justify-content:space-between; font-size:12px; color:#aaa; margin-bottom:6px;">
+                <span>🌙 Night</span><span>Brightness</span><span>Day ☀️</span>
+            </div>
+            <input type="range" id="lighting-brightness-slider" min="0" max="100" value="75" style="width:100%;">
+        </div>
+        <div style="font-size:12px; color:#888;">Saved with the map - applies when you Publish/Play it too, not just here in Studio.</div>
+    </div>
+`;
+document.body.appendChild(lightingPanel);
+const lightingSlider = lightingPanel.querySelector('#lighting-brightness-slider');
+lightingPanel.querySelector('#lighting-panel-close').onclick = () => { lightingPanel.style.display = 'none'; };
+lightingPanel.addEventListener('click', (e) => { if (e.target === lightingPanel) lightingPanel.style.display = 'none'; });
+lightingSlider.addEventListener('input', () => {
+    const b = parseInt(lightingSlider.value, 10) / 100;
+    world.lighting = world.lighting || {};
+    world.lighting.brightness = b;
+    applyWorldLighting(b);
+});
+
 document.getElementById('tool-studio-daynight').onclick = () => {
     playSwitch();
-    setStudioDayNight(!studioIsDay);
+    lightingSlider.value = Math.round((world.lighting?.brightness ?? 0.75) * 100);
+    lightingPanel.style.display = 'flex';
 };
+
+// --- Camera mode panel: sets the map's default view (third-person vs first-person) for
+// when it's Played/Tested. Players can still override it for themselves anytime during
+// gameplay with the V key (see the keydown handler and updatePlaying()'s camera code below).
+const cameraModePanel = document.createElement('div');
+cameraModePanel.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1200; display:none; align-items:center; justify-content:center; font-family:sans-serif;';
+cameraModePanel.innerHTML = `
+    <div style="background:#1e1e1e; color:#fff; border-radius:10px; padding:20px; width:300px; max-width:90vw; display:flex; flex-direction:column; gap:12px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:0; font-size:16px;">🎥 Default Camera</h3>
+            <button id="camera-mode-panel-close" style="background:none; border:none; color:#aaa; font-size:20px; cursor:pointer; line-height:1;">×</button>
+        </div>
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="radio" name="camera-mode-radio" value="third"> Third Person (normal view)
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="radio" name="camera-mode-radio" value="first"> First Person
+        </label>
+        <div style="font-size:12px; color:#888;">Players can still switch for themselves in-game with the V key - this just sets what they start with.</div>
+    </div>
+`;
+document.body.appendChild(cameraModePanel);
+cameraModePanel.querySelector('#camera-mode-panel-close').onclick = () => { cameraModePanel.style.display = 'none'; };
+cameraModePanel.addEventListener('click', (e) => { if (e.target === cameraModePanel) cameraModePanel.style.display = 'none'; });
+cameraModePanel.querySelectorAll('input[name="camera-mode-radio"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+        if (radio.checked) world.cameraMode = radio.value;
+    });
+});
+
+document.getElementById('tool-camera-mode').onclick = () => {
+    playSwitch();
+    const current = world.cameraMode || 'third';
+    cameraModePanel.querySelectorAll('input[name="camera-mode-radio"]').forEach(radio => {
+        radio.checked = (radio.value === current);
+    });
+    cameraModePanel.style.display = 'flex';
+};
+
+// The player's currently active camera view during a PLAYING/TEST session - starts from the
+// map's default (world.cameraMode) each time a session begins, but can be toggled anytime
+// with V (see the keydown handler further below).
+let cameraViewMode = 'third';
+function setCameraViewMode(mode) {
+    cameraViewMode = mode === 'first' ? 'first' : 'third';
+    // Hide just the head in first-person (not the whole body) so the camera doesn't end up
+    // stuck inside your own head mesh, while shadows/reflections/other players still see a
+    // normal-looking you.
+    if (player && player.head) player.head.visible = (cameraViewMode !== 'first');
+    addChatMessage('System', cameraViewMode === 'first' ? 'First-person view (press V to switch back)' : 'Third-person view (press V for first-person)');
+}
+window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() !== 'v') return;
+    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    e.preventDefault();
+    setCameraViewMode(cameraViewMode === 'first' ? 'third' : 'first');
+});
 
 // Create Thumbnail tool (PC only) - captures renderer canvas and saves thumbnail locally for current editing map
 const btnCreateThumb = document.getElementById('tool-create-thumb');
@@ -3037,6 +3606,7 @@ btnPlaySolo.onclick = () => {
     
     player.mesh.visible = true;
     player.respawn(world);
+    setCameraViewMode(world.cameraMode || 'third');
 
     // Handle Custom Music: Play Test used to never touch world.bgm at all, so any music you
     // added in Studio only ever actually played once you Published and opened the real link -
@@ -3107,6 +3677,7 @@ btnStopTest.onclick = () => {
     playSwitch();
     gameState = 'STUDIO';
     player.mesh.visible = false;
+    if (player.head) player.head.visible = true; // undo first-person head-hide, if it was on
     btnStopTest.style.display = 'none';
     studioGui.style.display = 'flex';
     resetAllRigsToSpawn();
@@ -3307,6 +3878,35 @@ room.onmessage = (evt) => {
     try {
         const data = evt.data;
         if (!data || !data.type) return;
+
+        if (data.type === 'weapon_hit') {
+            // Client-authoritative hit: the attacker's client already decided this hit
+            // landed and computed the damage - we just apply it to our own player if we're
+            // the target (never trust/apply damage aimed at someone else).
+            if (data.targetId === room.clientId && typeof player !== 'undefined') {
+                player.takeDamage(data.damage || 0);
+            }
+            return;
+        }
+
+        if (data.type === 'appearance') {
+            // One-shot shirt/face/model-hat sync (see broadcastAppearance()) - this was
+            // being sent but never actually listened for, so nobody's custom shirt/face/
+            // hat ever reached anyone else. Ignore our own echo, apply everyone else's to
+            // their RemotePlayer.
+            if (evt.clientId && evt.clientId !== room.clientId) {
+                const rp = remotePlayers[evt.clientId];
+                if (rp && typeof rp.applyAppearance === 'function') {
+                    const payload = { shirtUrl: data.shirtUrl, faceUrl: data.faceUrl };
+                    // Only include 'hat' at all if the sender actually said something about
+                    // it (see RemotePlayer.applyAppearance's hasOwnProperty check) - a plain
+                    // shirt/face broadcast must never be mistaken for "remove the hat".
+                    if (Object.prototype.hasOwnProperty.call(data, 'hat')) payload.hat = data.hat;
+                    rp.applyAppearance(payload);
+                }
+            }
+            return;
+        }
 
         if (data.type === 'donate_robux') {
             const fromName = evt.username || (room.peers && room.peers[evt.clientId] && room.peers[evt.clientId].username) || data.username || 'Someone';
@@ -3509,30 +4109,22 @@ function startGame(mapName, mapData = null, opts = {}) {
         const existingRid = existingParams.get('rid');
         const existingId = existingParams.get('id');
 
-        // Preserve the Devdex-equipped-avatar params too, otherwise the very
-        // URL that gets shown/copied/shared as the "play link" silently
-        // drops them and the equipped catalog item stops showing up for
-        // anyone (including the owner) who opens that link.
-        const devdexExtra = new URLSearchParams();
-        ['devdexItemImage', 'devdexItemType', 'devdexUsername'].forEach((key) => {
-            const val = existingParams.get(key);
-            if (val) devdexExtra.set(key, val);
-        });
-        const devdexSuffix = devdexExtra.toString() ? `&${devdexExtra.toString()}` : '';
-
+        // NOTE: no longer carrying over devdexItemImage/devdexItemType/devdexUsername here -
+        // those reflect whatever's equipped on the Devdex site in this browser tab, not
+        // anything about the map itself, so a saved/played link stays clean of them.
         let playUrl;
         if (existingData) {
             // Self-contained link - keep it exactly as-is.
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${existingData}${devdexSuffix}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&data=${existingData}`;
         } else if (existingBucket && existingRid) {
             // Already a real shareable link - keep it exactly as-is.
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${existingBucket}&rid=${existingRid}${devdexSuffix}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&bucket=${existingBucket}&rid=${existingRid}`;
         } else if (existingId) {
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${existingId}${devdexSuffix}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&id=${existingId}`;
         } else {
             // No share info in the current URL (e.g. played from the in-menu Play list) -
             // just tag it with a fresh run id, purely cosmetic for the address bar.
-            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${Date.now()}${devdexSuffix}`;
+            playUrl = `${window.location.origin}${window.location.pathname}?play=${encodeURIComponent(mapName)}&run=${Date.now()}`;
         }
 
         try { localStorage.setItem('nblox_map_url_' + mapName, playUrl); } catch(e){}
@@ -3597,6 +4189,7 @@ function startGame(mapName, mapData = null, opts = {}) {
 
     if (world.mapGroup) world.mapGroup.visible = true;
     player.respawn(world);
+    setCameraViewMode(world.cameraMode || 'third');
 
     // Auto-lock mouse on start
     setTimeout(() => {
@@ -3618,6 +4211,10 @@ function startGame(mapName, mapData = null, opts = {}) {
     } catch (e) {
         console.warn("Failed to send initial presence:", e);
     }
+    // Shirt/face images aren't in presence (see serializeAppearance's comment) - send them
+    // once, right away, via their own one-shot broadcast instead. Fixes custom shirts/faces
+    // (including a Devdex-equipped item) not showing up for other players at all.
+    broadcastAppearance();
 }
 
 document.getElementById('btn-play').onclick = () => {
@@ -4110,6 +4707,7 @@ btnExit.onclick = () => {
     btnExit.style.display = 'none';
     btnReset.style.display = 'none';
     playerList.style.display = 'none';
+    if (player.head) player.head.visible = true; // undo first-person head-hide, if it was on
 
     startMenu.style.display = 'block';
     gameState = 'MENU';
@@ -5474,6 +6072,18 @@ function animate(currentTime) {
         // Update Remote Players
         Object.values(remotePlayers).forEach(rp => rp.update(dt, camera, world));
 
+        // Keep the actual scene lights in sync with the current map's saved brightness
+        // (world.lighting.brightness) - cheap to check every frame, and means the Day/Night
+        // slider's value applies correctly whether editing in Studio or really playing,
+        // and immediately picks up a newly loaded/switched map's own saved value too.
+        if (gameState === 'STUDIO' || gameState === 'PLAYING' || gameState === 'TEST') {
+            const targetBrightness = (world.lighting && typeof world.lighting.brightness === 'number') ? world.lighting.brightness : 0.75;
+            if (targetBrightness !== lastAppliedBrightness) {
+                lastAppliedBrightness = targetBrightness;
+                applyWorldLighting(targetBrightness);
+            }
+        }
+
         // Game Logic based on State
         if (gameState === 'PLAYING' || gameState === 'TEST') {
             updatePlaying(dt);
@@ -5644,6 +6254,7 @@ function updatePlaying(dt) {
     if (world.mapGroup) world.mapGroup.visible = true;
     menuGroup.visible = false;
     updateWeaponSystem(dt);
+    updateHealthHUD();
     
     // POINTS: award 1 point every 10 seconds played
     playSecondsAcc += dt;
@@ -5669,6 +6280,14 @@ function updatePlaying(dt) {
         map: currentMapName,
         isDead: player.isDead
     });
+
+    // Periodically re-announce shirt/face (throttled - see broadcastAppearance()'s comment
+    // for why these don't just ride along with the presence update above).
+    appearanceBroadcastTimer += dt;
+    if (appearanceBroadcastTimer >= 4) {
+        appearanceBroadcastTimer = 0;
+        broadcastAppearance();
+    }
 
     // Unanchored Parts Physics: any part with Anchored=false falls with gravity, exactly
     // like the player/RigBots (also used for parts that fell/detached off a RigBot weld,
@@ -5857,6 +6476,23 @@ function updatePlaying(dt) {
     }
 
     // 2. Update Camera Position
+    if (cameraViewMode === 'first') {
+        // First-person: camera sits at eye height and looks exactly where cameraYaw/
+        // cameraPitch point - no orbiting focus point, no wall-avoidance needed (there's
+        // nothing behind the camera to clip through). Forward direction derived to match
+        // third-person's turning feel exactly (see the else branch: third-person's camera
+        // looks FROM its orbit position BACK AT the focus point, i.e. facing
+        // -offset - mirroring that here keeps turning consistent between the two modes).
+        const eyePos = player.position.clone().add(new THREE.Vector3(0, 4.8, 0));
+        const lookDir = new THREE.Vector3(
+            -Math.sin(cameraYaw) * Math.cos(cameraPitch),
+            -Math.sin(cameraPitch),
+            -Math.cos(cameraYaw) * Math.cos(cameraPitch)
+        );
+        camera.position.copy(eyePos);
+        camera.lookAt(eyePos.clone().add(lookDir));
+        if (world.skyboxMesh) world.skyboxMesh.position.copy(camera.position);
+    } else {
     const focusPoint = player.position.clone().add(new THREE.Vector3(0, 4.5, 0));
 
     if (input.isShiftLocked) {
@@ -5892,6 +6528,7 @@ function updatePlaying(dt) {
     camera.lookAt(focusPoint);
 
     if (world.skyboxMesh) world.skyboxMesh.position.copy(camera.position);
+    }
 
     // Update Cursor UI for Shift Lock
     if (input.isShiftLocked) {

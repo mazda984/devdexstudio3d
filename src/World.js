@@ -82,6 +82,18 @@ export class World {
 
         this.bgm = null;
 
+        // Lighting: how bright day/night is for this map (0 = near-pitch-black night, 1 =
+        // full bright day). Saved with the map (meta_lighting, see serialize()/
+        // loadFromData()) and applied in main.js's applyWorldLighting() - both while
+        // editing in Studio AND during actual Play/Test, so what the map author sets
+        // actually carries over to the published game instead of being Studio-only.
+        this.lighting = { brightness: 0.75 };
+
+        // Default camera mode for this map ('third' | 'first') - see the Camera tool next
+        // to Script in the Studio toolbar. Players can still toggle it themselves in-game
+        // with the V key; this just sets what they start with.
+        this.cameraMode = 'third';
+
         this.skyboxMesh = null;
         this.setupSkybox();
         this.loadMap('platform');
@@ -132,6 +144,11 @@ export class World {
         });
         
         this.bgm = null;
+        // Reset to defaults on clear (a freshly loaded/new map should start at the normal
+        // brightness/camera mode unless its own meta_lighting/meta_camera entries say
+        // otherwise - loadFromData() overwrites these again right after this if present).
+        this.lighting = { brightness: 0.75 };
+        this.cameraMode = 'third';
         // RigBots can't be reconstructed here (they need the player-mesh factory from
         // main.js), so loadFromData() queues raw rig data here for main.js to spawn.
         this.pendingRigs = [];
@@ -279,23 +296,25 @@ export class World {
 
     // Runs every OnTickUpdate:command? rule on a fixed timer (currently every 1.4s,
     // independent of framerate). Call this once per frame during gameplay.
+    //
+    // IMPORTANT: this used to be a per-client stopwatch that started counting from 0
+    // whenever THAT client's map finished loading - so a friend joining a few seconds late
+    // saw rising lava (etc.) a few ticks behind everyone else, and it would never catch up.
+    // Instead, the "current tick number" is now derived straight from the system clock
+    // (Date.now()), which every player's device already agrees on without any network
+    // messages - so whoever asks "what tick are we on?" at the same real-world moment gets
+    // the same answer, whether they've been in the game for an hour or just joined.
     updateScriptTicks(dt) {
         if (!this.scriptRules || this.scriptRules.length === 0) return;
-        if (!this._tickState) this._tickState = {};
         const TICK_INTERVAL = 1.4;
-        this.scriptRules.forEach((rule, idx) => {
+        const tickCount = Math.floor(Date.now() / (TICK_INTERVAL * 1000));
+        this.scriptRules.forEach((rule) => {
             if (rule.event !== 'tick') return;
-            if (!this._tickState[idx]) this._tickState[idx] = { elapsed: 0, toggled: false };
-            const st = this._tickState[idx];
-            st.elapsed += dt;
-            if (st.elapsed >= TICK_INTERVAL) {
-                st.elapsed -= TICK_INTERVAL;
-                this.runTickScriptCommand(rule, st);
-            }
+            this.runTickScriptCommand(rule, tickCount);
         });
     }
 
-    runTickScriptCommand(rule, state) {
+    runTickScriptCommand(rule, tickCount) {
         switch (rule.command) {
             case 'changecolor': {
                 // changecolor? <blockName> <colorName> - blinks the named block between its
@@ -305,15 +324,17 @@ export class World {
                 const target = this.items.find(o => o.name === blockName);
                 if (!target || !target.material) return;
                 const mat0 = Array.isArray(target.material) ? target.material[0] : target.material;
-                if (state.originalColor === undefined) state.originalColor = mat0.color.getHex();
+                if (target.userData._origColor === undefined) target.userData._origColor = mat0.color.getHex();
 
-                const goingToColor = !state.toggled;
-                const applyHex = goingToColor ? World.parseColorArg(colorArg) : state.originalColor;
+                // Purely a function of the shared tick count (see updateScriptTicks above) -
+                // every client lands on the exact same on/off phase at the exact same
+                // real-world moment, regardless of when they joined.
+                const showAltColor = tickCount % 2 === 1;
+                const applyHex = showAltColor ? World.parseColorArg(colorArg) : target.userData._origColor;
                 const col = new THREE.Color(applyHex);
                 if (Array.isArray(target.material)) target.material.forEach(m => m.color.copy(col));
                 else target.material.color.copy(col);
                 if (target.userData.serial) target.userData.serial.color = applyHex;
-                state.toggled = goingToColor;
                 break;
             }
             case 'rise': {
@@ -328,17 +349,16 @@ export class World {
                 const maxSteps = Math.max(1, parseInt(maxStepsArg, 10) || 1);
                 const step = stepArg !== undefined && stepArg !== '' ? parseFloat(stepArg) : 1;
 
-                if (state.baseY === undefined) state.baseY = target.position.y;
-                if (state.step === undefined) state.step = 0;
+                // Cached once per mesh, the first time we see it - at that point every
+                // client's copy is still sitting at the map's original saved height (no
+                // client has touched it yet), so it's the same value everywhere.
+                if (target.userData._riseBaseY === undefined) target.userData._riseBaseY = target.position.y;
 
-                state.step++;
-                if (state.step > maxSteps) {
-                    // Completed a full climb - reset back to the start and begin rising again.
-                    state.step = 0;
-                    target.position.y = state.baseY;
-                } else {
-                    target.position.y = state.baseY + state.step * step;
-                }
+                // Purely a function of the shared tick count: same real-world moment ->
+                // same cycle position -> same height, for every client, whether they've been
+                // watching it rise the whole time or just walked in.
+                const cyclePos = tickCount % (maxSteps + 1); // 0..maxSteps, then wraps to 0
+                target.position.y = target.userData._riseBaseY + cyclePos * step;
                 break;
             }
             default:
@@ -407,6 +427,42 @@ export class World {
         else if (mesh.material) mesh.material.dispose();
     }
 
+    // Attaches/updates/removes a PointLight "welded" to a part, so blocks can act as real
+    // light sources (lamps, house lighting, etc.) - not just visually colored/glowing, but
+    // actually lighting up their surroundings. Stored under mesh.userData._light so it can
+    // be found again to update or remove later (see main.js's Properties panel "Light"
+    // section). Persists automatically through World.serialize()/loadFromData() as part of
+    // the part's normal props (props.light), same mechanism as material/weaponType.
+    applyPartLight(mesh, lightProps) {
+        if (!mesh) return;
+        if (mesh.userData._light) {
+            mesh.remove(mesh.userData._light);
+            mesh.userData._light.dispose && mesh.userData._light.dispose();
+            mesh.userData._light = null;
+        }
+        if (!lightProps || !lightProps.enabled) {
+            if (mesh.userData.serial) {
+                mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, { light: null });
+            }
+            return;
+        }
+
+        const color = lightProps.color !== undefined ? lightProps.color : 0xffffaa;
+        const intensity = lightProps.intensity !== undefined ? lightProps.intensity : 1.2;
+        const distance = lightProps.distance !== undefined ? lightProps.distance : 12;
+
+        const light = new THREE.PointLight(new THREE.Color(color), intensity, distance);
+        light.position.set(0, 0, 0); // centered on the part - simplest, works for any shape/size
+        mesh.add(light);
+        mesh.userData._light = light;
+
+        if (mesh.userData.serial) {
+            mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, {
+                light: { enabled: true, color, intensity, distance }
+            });
+        }
+    }
+
     // Bird: simple decorative prop that bobs/drifts in place (spawned via the Studio
     // toolbox's "Bird" button). Lives here (rather than inline in main.js) so the exact
     // same construction code runs both when you place one AND when a saved/published map
@@ -440,6 +496,124 @@ export class World {
         return bird;
     }
 
+    // Text Block: a thin, semi-transparent "glass sign" the player can write text on (e.g.
+    // signs, labels, instructions). Text is rendered into a small canvas and used as a
+    // texture, so any font/wrap logic is plain 2D canvas drawing - no external font/label
+    // library needed. The canvas is kept on userData so updateTextBlockContent() can redraw
+    // it in place later (editing the text in Properties doesn't need to rebuild the mesh).
+    createTextBlock(x, y, z, text = 'Text', options = {}) {
+        const w = options.w || 4, h = options.h || 2, d = options.d || 0.3;
+        const textColor = options.textColor !== undefined ? options.textColor : 0x000000;
+
+        const geo = new THREE.BoxGeometry(w, h, d);
+        const canvas = document.createElement('canvas');
+        canvas.width = 512;
+        canvas.height = 256;
+
+        // The 4 "edge" faces (sides/top/bottom) just get a plain translucent glass tint...
+        const glassMat = new THREE.MeshPhysicalMaterial({
+            color: 0xbfe8ff, transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0,
+            side: THREE.DoubleSide
+        });
+        // ...while front/back get the actual text, drawn on a matching glass-tinted backdrop
+        // so the whole block reads as one consistent pane, not just two random faces.
+        const textTexture = this._drawTextTexture(canvas, text, textColor);
+        const textMat = new THREE.MeshBasicMaterial({ map: textTexture, transparent: true, side: THREE.DoubleSide });
+
+        // BoxGeometry's default face-group order is [+x, -x, +y, -y, +z, -z].
+        const mats = [glassMat, glassMat, glassMat, glassMat, textMat, textMat];
+
+        const mesh = new THREE.Mesh(geo, mats);
+        mesh.position.set(x, y, z);
+        mesh.name = 'TextBlock';
+        mesh.userData._textCanvas = canvas;
+        mesh.userData.serial = {
+            type: 'text_block', w, h, d, color: 0xbfe8ff, flags: ['static'],
+            props: { text, textColor }
+        };
+
+        this.mapGroup.add(mesh);
+        this.items.push(mesh);
+        // Solid like a normal block (you can stand on/bump into the glass), matching how a
+        // real sign or glass panel would behave.
+        this.collidables.push(mesh);
+        mesh.userData.collide = true;
+        return mesh;
+    }
+
+    // Renders `text` onto `canvas` (word-wrapped, auto-shrinking font, centered) and returns
+    // a fresh CanvasTexture. Shared by createTextBlock() and updateTextBlockContent() so
+    // both the initial build and later edits use identical layout logic.
+    _drawTextTexture(canvas, text, textColorHex) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Translucent glass-tinted backdrop matching the block's other 4 faces.
+        ctx.fillStyle = 'rgba(210, 235, 255, 0.28)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#' + new THREE.Color(textColorHex ?? 0x000000).getHexString();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const words = String(text || '').split(/\s+/).filter(Boolean);
+        const maxWidth = canvas.width - 40;
+        let fontSize = 48;
+        let lines = [];
+
+        const wrapAtCurrentSize = () => {
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            lines = [];
+            let line = '';
+            for (const word of words) {
+                const test = line ? line + ' ' + word : word;
+                if (line && ctx.measureText(test).width > maxWidth) {
+                    lines.push(line);
+                    line = word;
+                } else {
+                    line = test;
+                }
+            }
+            if (line) lines.push(line);
+        };
+        wrapAtCurrentSize();
+        // Shrink the font until every line fits vertically too, so long text degrades
+        // gracefully instead of spilling off the block.
+        while (lines.length * (fontSize * 1.2) > canvas.height - 30 && fontSize > 16) {
+            fontSize -= 4;
+            wrapAtCurrentSize();
+        }
+
+        const lineHeight = fontSize * 1.2;
+        const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+        lines.forEach((line, i) => ctx.fillText(line, canvas.width / 2, startY + i * lineHeight));
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    // Redraws a Text Block's content in place (called from the Properties panel when the
+    // text/color is edited) - reuses the same canvas + geometry, just swaps the texture, so
+    // it's cheap and doesn't disturb the block's position/selection/transform gizmo.
+    updateTextBlockContent(mesh, text, textColor) {
+        if (!mesh || !mesh.userData || !mesh.userData._textCanvas) return;
+        const resolvedColor = textColor !== undefined ? textColor : (mesh.userData.serial && mesh.userData.serial.props && mesh.userData.serial.props.textColor) || 0x000000;
+        const newTex = this._drawTextTexture(mesh.userData._textCanvas, text, resolvedColor);
+
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        mats.forEach(m => {
+            if (m.map) {
+                m.map.dispose();
+                m.map = newTex;
+                m.needsUpdate = true;
+            }
+        });
+
+        if (mesh.userData.serial) {
+            mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, { text, textColor: resolvedColor });
+        }
+    }
+
     serialize() {
         const data = [];
         // Save BGM as a special meta entry or property
@@ -448,6 +622,14 @@ export class World {
         }
         if (this.script) {
             data.push({ type: 'meta_script', text: this.script });
+        }
+        // Only bother saving these if they differ from the defaults - keeps old/simple maps'
+        // saved data from growing for no reason.
+        if (this.lighting && this.lighting.brightness !== 0.75) {
+            data.push({ type: 'meta_lighting', brightness: this.lighting.brightness });
+        }
+        if (this.cameraMode && this.cameraMode !== 'third') {
+            data.push({ type: 'meta_camera', mode: this.cameraMode });
         }
 
         this.items.forEach(obj => {
@@ -519,12 +701,17 @@ export class World {
                     this.bgm = d.url;
                 } else if (d.type === 'meta_script') {
                     this.setScript(d.text);
+                } else if (d.type === 'meta_lighting') {
+                    this.lighting = { brightness: typeof d.brightness === 'number' ? d.brightness : 0.75 };
+                } else if (d.type === 'meta_camera') {
+                    this.cameraMode = d.mode === 'first' ? 'first' : 'third';
                 } else if (d.type === 'block' || d.type === 'box') {
                     const mesh = this.createBlock(d.x, d.y, d.z, d.w, d.h, d.d, d.color, d.flags, d.props && d.props.material);
                     mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
+                    if (d.props && d.props.light) this.applyPartLight(mesh, d.props.light);
                     placedCount++;
                 } else if (d.type === 'sphere' || d.type === 'cylinder' || d.type === 'wedge') {
                     const mesh = this.createPart(d.type, d.x, d.y, d.z, {x:d.w, y:d.h, z:d.d}, d.color, d.flags, d.props && d.props.material);
@@ -532,6 +719,7 @@ export class World {
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
+                    if (d.props && d.props.light) this.applyPartLight(mesh, d.props.light);
                     placedCount++;
                 } else if (d.type === 'bird') {
                     const mesh = this.createBird(d.x, d.y, d.z);
@@ -546,8 +734,22 @@ export class World {
                     // hand it off to main.js after load, same pattern as pendingRigs.
                     this.pendingModels.push(d);
                     placedCount++;
+                } else if (d.type === 'text_block') {
+                    const props = d.props || {};
+                    const mesh = this.createTextBlock(d.x, d.y, d.z, props.text || 'Text', {
+                        w: d.w, h: d.h, d: d.d, textColor: props.textColor
+                    });
+                    mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
+                    mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    if (d.name) mesh.name = d.name;
+                    this._applyAnchorState(mesh, d);
+                    if (d.props && d.props.light) this.applyPartLight(mesh, d.props.light);
+                    placedCount++;
+                } else if (d.type === 'weapon_pickup') {
+                    this.createWeaponPickup(d.x, d.y, d.z, (d.props && d.props.weaponType) || 'rocketlauncher');
                 } else if (d.type === 'weapon_rocketlauncher') {
-                    this.createWeaponPickup(d.x, d.y, d.z);
+                    // Legacy save format from before Sword existed - always a rocket launcher.
+                    this.createWeaponPickup(d.x, d.y, d.z, 'rocketlauncher');
                     placedCount++;
                 }
             } catch (e) {
@@ -564,32 +766,66 @@ export class World {
         }
     }
 
-    // Builds a simple rocket-launcher pickup: a small stand-alone gun model the player can
-    // walk up to and press E to equip in-game. No external assets needed (plain primitives),
-    // so - unlike RigBots/3D models - it can be fully reconstructed right here on load.
-    createWeaponPickup(x, y, z) {
+    // Builds a weapon pickup: a small stand-alone model the player can walk up to and press
+    // E to equip in-game. No external assets needed (plain primitives), so - unlike
+    // RigBots/3D models - it can be fully reconstructed right here on load. weaponType picks
+    // which model/behavior it is; more can be added here later without touching save/load,
+    // since they all share the same generic 'weapon_pickup' serialized type + props.weaponType.
+    createWeaponPickup(x, y, z, weaponType = 'rocketlauncher') {
         const group = new THREE.Group();
-        const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
-        const tubeMat = new THREE.MeshLambertMaterial({ color: 0x585858 });
 
-        const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.6, 10), tubeMat);
-        tube.rotation.z = Math.PI / 2;
-        group.add(tube);
+        if (weaponType === 'sword') {
+            const bladeMat = new THREE.MeshStandardMaterial({ color: 0xd8d8d8, metalness: 0.7, roughness: 0.25 });
+            const hiltMat = new THREE.MeshStandardMaterial({ color: 0x4a2e14, roughness: 0.8 });
+            const guardMat = new THREE.MeshStandardMaterial({ color: 0xc9a227, metalness: 0.6, roughness: 0.4 });
 
-        const grip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), bodyMat);
-        grip.position.set(-0.45, -0.35, 0);
-        group.add(grip);
+            const blade = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.035), bladeMat);
+            blade.position.set(0, 0.75, 0);
+            group.add(blade);
 
-        const sight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), bodyMat);
-        sight.position.set(0.35, 0.26, 0);
-        group.add(sight);
+            const tip = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.22, 4), bladeMat);
+            tip.position.set(0, 1.41, 0);
+            tip.rotation.y = Math.PI / 4;
+            group.add(tip);
+
+            const guard = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.08, 0.08), guardMat);
+            guard.position.set(0, 0.15, 0);
+            group.add(guard);
+
+            const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.35, 8), hiltMat);
+            grip.position.set(0, -0.05, 0);
+            group.add(grip);
+
+            const pommel = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), guardMat);
+            pommel.position.set(0, -0.24, 0);
+            group.add(pommel);
+
+            group.name = 'Sword';
+        } else {
+            weaponType = 'rocketlauncher';
+            const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
+            const tubeMat = new THREE.MeshLambertMaterial({ color: 0x585858 });
+
+            const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.6, 10), tubeMat);
+            tube.rotation.z = Math.PI / 2;
+            group.add(tube);
+
+            const grip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.16), bodyMat);
+            grip.position.set(-0.45, -0.35, 0);
+            group.add(grip);
+
+            const sight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), bodyMat);
+            sight.position.set(0.35, 0.26, 0);
+            group.add(sight);
+
+            group.name = 'RocketLauncher';
+        }
 
         group.position.set(x || 0, y || 0, z || 0);
-        group.name = 'RocketLauncher';
         group.userData = {
             isWeaponPickup: true,
-            weaponType: 'rocketlauncher',
-            serial: { type: 'weapon_rocketlauncher', w: 1, h: 1, d: 1, color: 0x2b2b2b, flags: [], props: {} }
+            weaponType,
+            serial: { type: 'weapon_pickup', w: 1, h: 1, d: 1, color: 0x2b2b2b, flags: [], props: { weaponType } }
         };
 
         // Not passed through addToWorld()'s 'static' flag on purpose - a pickup shouldn't
