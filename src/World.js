@@ -743,7 +743,10 @@ export class World {
                     mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
+<<<<<<< HEAD
                     if (d.props && d.props.light) this.applyPartLight(mesh, d.props.light);
+=======
+>>>>>>> cd9b03a41ad3710ba699c828b6479b842372deef
                     placedCount++;
                 } else if (d.type === 'weapon_pickup') {
                     this.createWeaponPickup(d.x, d.y, d.z, (d.props && d.props.weaponType) || 'rocketlauncher');

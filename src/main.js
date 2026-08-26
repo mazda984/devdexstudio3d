@@ -1426,10 +1426,13 @@ const propInputs = {
     weaponType: document.getElementById('prop-weapon-type'),
     textContent: document.getElementById('prop-text-content'),
     textColor: document.getElementById('prop-text-color'),
+<<<<<<< HEAD
     lightEnabled: document.getElementById('prop-light-enabled'),
     lightColor: document.getElementById('prop-light-color'),
     lightIntensity: document.getElementById('prop-light-intensity'),
     lightDistance: document.getElementById('prop-light-distance'),
+=======
+>>>>>>> cd9b03a41ad3710ba699c828b6479b842372deef
 };
 
 // Rebuilds a part's material(s) to match the chosen named material ("plastic"/"wood"/
@@ -1552,6 +1555,7 @@ function updateStudioPropertiesUI() {
             if (propInputs.textColor) propInputs.textColor.value = '#' + new THREE.Color(props.textColor ?? 0x000000).getHexString();
         }
     }
+<<<<<<< HEAD
     // Light: available on any plain part (block/sphere/cylinder/wedge/text_block) - lets a
     // block act as a real light source (lamps, house lighting, etc.), not just visually lit.
     const lightSection = document.getElementById('prop-section-light');
@@ -1566,6 +1570,8 @@ function updateStudioPropertiesUI() {
             if (propInputs.lightDistance) propInputs.lightDistance.value = (lightProps && lightProps.distance !== undefined) ? lightProps.distance : 12;
         }
     }
+=======
+>>>>>>> cd9b03a41ad3710ba699c828b6479b842372deef
     // Assuming Standard Material props, though our blocks use array
     if (mat) {
         propInputs.reflect.value = 0; // Placeholder
@@ -1748,6 +1754,7 @@ const onPropChange = () => {
         world.updateTextBlockContent(m, newText, newColorHex);
     }
 
+<<<<<<< HEAD
     // Light: apply/update/remove a real PointLight on this part whenever the Light section's
     // fields change - lets blocks act as actual light sources (lamps, house lighting, etc.)
     // that are saved with the map and show up when Published/Played, not just visually here.
@@ -1760,6 +1767,8 @@ const onPropChange = () => {
         });
     }
 
+=======
+>>>>>>> cd9b03a41ad3710ba699c828b6479b842372deef
     // Colors
     const col = new THREE.Color(propInputs.color.value);
     if (Array.isArray(m.material)) m.material.forEach(mat => mat.color = col);
