@@ -137,6 +137,23 @@ export class World {
         this.scene.add(this.skyboxMesh);
     }
 
+    // Darkens the skybox to match the Day/Night brightness (see main.js's
+    // applyWorldLighting()). The skybox uses MeshBasicMaterial (unlit, by design - so it
+    // doesn't need a light source to be visible at all) which means normal scene lighting
+    // (ambient/sun) has ZERO effect on it - dimming those alone left the sky image just as
+    // bright at "night" as at "day", which is why full darkness never actually looked dark.
+    // Tinting each face's own .color toward black (it multiplies with the texture) fixes
+    // that without needing any transparency/blend-order handling.
+    setSkyboxDarkness(brightness) {
+        if (!this.skyboxMesh) return;
+        const b = Math.max(0, Math.min(1, brightness ?? 0.75));
+        // Small floor (not all the way to 0) so the sky doesn't flash to a jarring pure-black
+        // rectangle - just reads as a believably dark night sky.
+        const shade = 0.04 + b * 0.96;
+        const mats = Array.isArray(this.skyboxMesh.material) ? this.skyboxMesh.material : [this.skyboxMesh.material];
+        mats.forEach(m => { if (m && m.color) m.color.setScalar(shade); });
+    }
+
     clear() {
         this.items.forEach(mesh => {
             this.mapGroup.remove(mesh);

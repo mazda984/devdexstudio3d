@@ -170,7 +170,23 @@ scene.add(ambient);
 
 const sun = new THREE.DirectionalLight(0xffffff, 0.8);
 sun.position.set(20, 50, 20);
+// Real sunlight shadows: previously only the newer per-part point lights (see
+// World.applyPartLight) could cast shadows - the main "daylight" sun never did, so blocks
+// never shadowed the ground/each other at all under normal lighting. A fairly large, fixed
+// orthographic frustum keeps this simple and correctly covers a typical map's play area;
+// it's re-centered on the player every frame (see animate()) so shadows stay sharp/in-range
+// even as the player wanders far from the origin on bigger maps.
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -60;
+sun.shadow.camera.right = 60;
+sun.shadow.camera.top = 60;
+sun.shadow.camera.bottom = -60;
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 200;
+sun.shadow.bias = -0.0015;
 scene.add(sun);
+scene.add(sun.target);
 
 // Studio lighting set (key, fill, rim) - created but not enabled until studio mode.
 // We'll toggle these for a clearer modeling view in the studio.
@@ -191,12 +207,26 @@ function addStudioLights() {
     ambient.color.setScalar(1.0);
     sun.color.set(0xffffff);
     scene.background = null;
+    if (world && typeof world.setSkyboxDarkness === 'function') world.setSkyboxDarkness(1); // undo any darkening from a played dark map
     lastAppliedBrightness = null; // force the next Play/Test to re-apply its own lighting fresh
 
     // Key light - warm directional
     const key = new THREE.DirectionalLight(0xfff1e0, 1.0);
     key.position.set(30, 50, 30);
-    key.castShadow = false;
+    // Was deliberately off before shadows existed at all in this project; now that blocks
+    // actually cast/receive shadows (see createBlock/createPart's castShadow/receiveShadow
+    // and applyPartLight), leaving this off meant Studio's own editing view never showed any
+    // shadow at all even while placing/testing lights - so what you saw while building never
+    // matched what Play/Publish actually looked like.
+    key.castShadow = true;
+    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.camera.left = -60;
+    key.shadow.camera.right = 60;
+    key.shadow.camera.top = 60;
+    key.shadow.camera.bottom = -60;
+    key.shadow.camera.near = 1;
+    key.shadow.camera.far = 200;
+    key.shadow.bias = -0.0015;
     key.name = 'studio_key';
 
     // Fill light - soft cool hemisphere
@@ -214,6 +244,7 @@ function addStudioLights() {
     scene.add(helperGroup);
 
     scene.add(key);
+    scene.add(key.target); // needed for its shadow camera to actually point anywhere
     scene.add(fill);
     scene.add(rim);
 
@@ -3384,16 +3415,16 @@ let lastAppliedBrightness = null; // tracks what applyWorldLighting() last saw, 
 
 function applyWorldLighting(brightness) {
     const b = Math.max(0, Math.min(1, brightness ?? 0.75));
-    ambient.intensity = 0.08 + b * 0.62;
+    ambient.intensity = 0.03 + b * 0.67;
     ambient.color.set(b < 0.35 ? 0x8fa5c9 : 0xffffff); // cool tint as it gets darker
     sun.intensity = b * 0.9;
     sun.visible = b > 0.05;
-    if (b < 0.3) {
-        // Blend the sky toward black as it gets dark, rather than an abrupt cutover.
-        scene.background = new THREE.Color(0x05070c).lerp(new THREE.Color(0x141a26), b / 0.3);
-    } else {
-        scene.background = null; // let the skybox mesh show through
-    }
+    // The skybox is unlit by design (MeshBasicMaterial - always visible even with zero
+    // scene light), and it's real 3D geometry drawn over scene.background regardless of
+    // that color, so darkening scene.background alone never actually did anything visible -
+    // this is what actually makes "night" look dark now.
+    if (world && typeof world.setSkyboxDarkness === 'function') world.setSkyboxDarkness(b);
+    scene.background = null; // always let the (now properly darkened) skybox mesh show through
 }
 
 // Toggle Studio Day/Night state
@@ -6150,6 +6181,15 @@ function animate(currentTime) {
 }
 
 function updateStudio(dt) {
+    // Keep the studio key light's shadow centered on wherever the camera is looking, so
+    // shadows stay sharp/in-range no matter where in a large map you're currently editing
+    // (matches the same fix in updatePlaying() for the sun during actual gameplay).
+    if (studioLights.key) {
+        studioLights.key.position.set(camera.position.x + 30, camera.position.y + 50, camera.position.z + 30);
+        studioLights.key.target.position.copy(camera.position);
+        studioLights.key.target.updateMatrixWorld();
+    }
+
     // Fly Camera Logic
     // Right Click to rotate
     if (input.isRightMouseDown) {
@@ -6307,6 +6347,14 @@ function updatePlaying(dt) {
     menuGroup.visible = false;
     updateWeaponSystem(dt);
     updateHealthHUD();
+
+    // Keep the sun's shadow frustum centered on the player (see its setup above) so
+    // block-cast shadows stay sharp and in-range no matter where the player wanders,
+    // instead of a shadow camera fixed at the world origin that would miss most of a
+    // larger map entirely.
+    sun.position.set(player.position.x + 20, player.position.y + 50, player.position.z + 20);
+    sun.target.position.copy(player.position);
+    sun.target.updateMatrixWorld();
     
     // POINTS: award 1 point every 10 seconds played
     playSecondsAcc += dt;
