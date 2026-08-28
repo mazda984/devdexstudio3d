@@ -128,7 +128,11 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 500);
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
-renderer.shadowMap.enabled = false;
+// Was globally off - part lights (see World.applyPartLight) now cast real shadows, which
+// needs this on. Basic (not PCFSoft) shadow type keeps the extra cost as low as possible
+// since maps can have several lit parts (e.g. a whole house full of lamps) at once.
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.BasicShadowMap;
 document.body.appendChild(renderer.domElement);
 renderer.domElement.style.imageRendering = 'pixelated';
 
@@ -179,6 +183,15 @@ let studioLights = {
 
 function addStudioLights() {
     if (studioLights.key) return; // already added
+
+    // Defensive reset: a just-finished Play/Test session may have left the global ambient/
+    // sun tinted or dimmed by applyWorldLighting() (e.g. testing a dark night map) - Studio
+    // has always managed its own separate brightness via studioLights below, so make sure
+    // it isn't silently inheriting a leftover tint/darkness from whatever was last played.
+    ambient.color.setScalar(1.0);
+    sun.color.set(0xffffff);
+    scene.background = null;
+    lastAppliedBrightness = null; // force the next Play/Test to re-apply its own lighting fresh
 
     // Key light - warm directional
     const key = new THREE.DirectionalLight(0xfff1e0, 1.0);
@@ -1562,8 +1575,8 @@ function updateStudioPropertiesUI() {
             const lightProps = (m.userData.serial.props && m.userData.serial.props.light) || null;
             if (propInputs.lightEnabled) propInputs.lightEnabled.checked = !!(lightProps && lightProps.enabled);
             if (propInputs.lightColor) propInputs.lightColor.value = '#' + new THREE.Color((lightProps && lightProps.color) ?? 0xffffaa).getHexString();
-            if (propInputs.lightIntensity) propInputs.lightIntensity.value = (lightProps && lightProps.intensity !== undefined) ? lightProps.intensity : 1.2;
-            if (propInputs.lightDistance) propInputs.lightDistance.value = (lightProps && lightProps.distance !== undefined) ? lightProps.distance : 12;
+            if (propInputs.lightIntensity) propInputs.lightIntensity.value = (lightProps && lightProps.intensity !== undefined) ? lightProps.intensity : 1.5;
+            if (propInputs.lightDistance) propInputs.lightDistance.value = (lightProps && lightProps.distance !== undefined) ? lightProps.distance : 30;
         }
     }
     // Assuming Standard Material props, though our blocks use array
@@ -1755,8 +1768,8 @@ const onPropChange = () => {
         world.applyPartLight(m, {
             enabled: propInputs.lightEnabled.checked,
             color: propInputs.lightColor ? new THREE.Color(propInputs.lightColor.value).getHex() : 0xffffaa,
-            intensity: propInputs.lightIntensity ? parseFloat(propInputs.lightIntensity.value) : 1.2,
-            distance: propInputs.lightDistance ? parseFloat(propInputs.lightDistance.value) : 12
+            intensity: propInputs.lightIntensity ? parseFloat(propInputs.lightIntensity.value) : 1.5,
+            distance: propInputs.lightDistance ? parseFloat(propInputs.lightDistance.value) : 30
         });
     }
 
@@ -3036,36 +3049,67 @@ document.getElementById('tool-wedge').onclick = () => {
     spawnPart('wedge');
 };
 
+// --- Background Music panel: choose between pasting a direct link to a hosted MP3/OGG, or
+// uploading a file. File uploads embed the whole audio as base64 directly in the map's saved
+// data - for music (often several MB, much bigger than most 3D models) that alone could blow
+// past the Publish link's size limit. A URL keeps the map's own data tiny (just the link
+// string) since the audio stays hosted wherever it already is and loads from there.
+const musicPanel = document.createElement('div');
+musicPanel.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1200; display:none; align-items:center; justify-content:center; font-family:sans-serif;';
+musicPanel.innerHTML = `
+    <div style="background:#1e1e1e; color:#fff; border-radius:10px; padding:20px; width:360px; max-width:90vw; display:flex; flex-direction:column; gap:12px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:0; font-size:16px;">🎵 Background Music</h3>
+            <button id="music-panel-close" style="background:none; border:none; color:#aaa; font-size:20px; cursor:pointer; line-height:1;">×</button>
+        </div>
+        <div style="font-size:12px; color:#888;">A direct link keeps your Publish link short - recommended over uploading a file, which embeds the whole song and can make the link too long to share.</div>
+        <div style="display:flex; gap:6px;">
+            <input type="text" id="music-url-input" placeholder="https://.../song.mp3" style="flex:1; padding:8px; border-radius:6px; border:1px solid #3a3a3a; background:#2a2a2a; color:#fff;">
+            <button id="music-url-set" style="padding:8px 12px; background:#3d7de0; color:#fff; border:none; border-radius:6px; cursor:pointer;">Use Link</button>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; color:#666; font-size:12px;"><div style="flex:1; height:1px; background:#3a3a3a;"></div>or<div style="flex:1; height:1px; background:#3a3a3a;"></div></div>
+        <button id="music-upload-btn" style="padding:8px; background:#3a3a3a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Upload Audio File Instead</button>
+        <button id="music-remove-btn" style="padding:8px; background:#5a2a2a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Remove Music</button>
+        <input type="file" id="music-file-input" accept="audio/*" style="display:none">
+    </div>
+`;
+document.body.appendChild(musicPanel);
+musicPanel.querySelector('#music-panel-close').onclick = () => { musicPanel.style.display = 'none'; };
+musicPanel.addEventListener('click', (e) => { if (e.target === musicPanel) musicPanel.style.display = 'none'; });
+
+musicPanel.querySelector('#music-url-set').onclick = () => {
+    const url = musicPanel.querySelector('#music-url-input').value.trim();
+    if (!url) return;
+    world.bgm = url;
+    addChatMessage('System', 'Music link set! It will play when the game starts.');
+    musicPanel.style.display = 'none';
+};
+
+const musicFileInput = musicPanel.querySelector('#music-file-input');
+musicPanel.querySelector('#music-upload-btn').onclick = () => musicFileInput.click();
+musicFileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+        world.bgm = evt.target.result;
+        addChatMessage('System', 'Music file loaded! Note: uploaded files are embedded directly in the map, which can make the Publish link too long to share - a direct link (top of this panel) avoids that.');
+        musicPanel.style.display = 'none';
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+});
+
+musicPanel.querySelector('#music-remove-btn').onclick = () => {
+    world.bgm = null;
+    addChatMessage('System', 'Music removed.');
+    musicPanel.style.display = 'none';
+};
+
 document.getElementById('tool-music').onclick = () => {
     playSwitch();
-    // Create invisible file input
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = 'audio/*'; // Accept audio files
-    fileInput.style.display = 'none';
-    document.body.appendChild(fileInput);
-
-    fileInput.onchange = (e) => {
-        if (e.target.files && e.target.files[0]) {
-            const file = e.target.files[0];
-            const reader = new FileReader();
-            
-            // Show loading or status?
-            reader.onload = (evt) => {
-                const result = evt.target.result;
-                // Removed size limit check
-                world.bgm = result;
-                alert("Music file loaded! It will play when the game starts.");
-                fileInput.remove();
-            };
-            
-            reader.readAsDataURL(e.target.files[0]);
-        } else {
-            fileInput.remove();
-        }
-    };
-    
-    fileInput.click();
+    musicPanel.querySelector('#music-url-input').value = (world.bgm && !world.bgm.startsWith('data:')) ? world.bgm : '';
+    musicPanel.style.display = 'flex';
 };
 
 function spawnPart(type) {
@@ -6073,14 +6117,22 @@ function animate(currentTime) {
         Object.values(remotePlayers).forEach(rp => rp.update(dt, camera, world));
 
         // Keep the actual scene lights in sync with the current map's saved brightness
-        // (world.lighting.brightness) - cheap to check every frame, and means the Day/Night
-        // slider's value applies correctly whether editing in Studio or really playing,
-        // and immediately picks up a newly loaded/switched map's own saved value too.
-        if (gameState === 'STUDIO' || gameState === 'PLAYING' || gameState === 'TEST') {
-            const targetBrightness = (world.lighting && typeof world.lighting.brightness === 'number') ? world.lighting.brightness : 0.75;
-            if (targetBrightness !== lastAppliedBrightness) {
-                lastAppliedBrightness = targetBrightness;
-                applyWorldLighting(targetBrightness);
+        // (world.lighting.brightness) while actually playing/testing - so the Day/Night
+        // slider's value really does show up in the played game, not just in Studio.
+        // Deliberately NOT applied during STUDIO: Studio has its own separate key/fill/rim
+        // lighting setup (addStudioLights()) purely for editing visibility, and fighting
+        // that with this every frame caused exactly the kind of lighting glitches this is
+        // meant to prevent.
+        if (gameState === 'PLAYING' || gameState === 'TEST') {
+            try {
+                const rawBrightness = (world && world.lighting && typeof world.lighting.brightness === 'number') ? world.lighting.brightness : 0.75;
+                const targetBrightness = Number.isFinite(rawBrightness) ? rawBrightness : 0.75;
+                if (targetBrightness !== lastAppliedBrightness) {
+                    lastAppliedBrightness = targetBrightness;
+                    applyWorldLighting(targetBrightness);
+                }
+            } catch (e) {
+                console.warn('applyWorldLighting sync failed:', e);
             }
         }
 
@@ -6540,7 +6592,12 @@ function updatePlaying(dt) {
 
     // 3. Movement relative to Camera
     const rawControls = input.getMovement();
-    const camFwd = new THREE.Vector3().subVectors(player.position, camera.position).setY(0).normalize();
+    // Direction is derived straight from cameraYaw (not camera.position minus player.position
+    // like before) - in first-person the camera sits almost exactly at the player's own X/Z
+    // (just raised to eye height), so that old subtraction produced a near-zero vector and
+    // silently made movement impossible whenever first-person was active. Deriving from yaw
+    // directly works identically and correctly in both camera modes.
+    const camFwd = new THREE.Vector3(-Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
     const camRight = new THREE.Vector3().crossVectors(camFwd, new THREE.Vector3(0, 1, 0)).normalize();
     
     const moveVec = new THREE.Vector3()

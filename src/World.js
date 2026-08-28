@@ -440,6 +440,12 @@ export class World {
             mesh.userData._light.dispose && mesh.userData._light.dispose();
             mesh.userData._light = null;
         }
+        if (mesh.userData._lightGlow) {
+            mesh.remove(mesh.userData._lightGlow);
+            mesh.userData._lightGlow.geometry.dispose();
+            mesh.userData._lightGlow.material.dispose();
+            mesh.userData._lightGlow = null;
+        }
         if (!lightProps || !lightProps.enabled) {
             if (mesh.userData.serial) {
                 mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, { light: null });
@@ -448,13 +454,37 @@ export class World {
         }
 
         const color = lightProps.color !== undefined ? lightProps.color : 0xffffaa;
-        const intensity = lightProps.intensity !== undefined ? lightProps.intensity : 1.2;
-        const distance = lightProps.distance !== undefined ? lightProps.distance : 12;
+        const intensity = lightProps.intensity !== undefined ? lightProps.intensity : 1.5;
+        // Range used to default to 12 studs, which barely lit the block it was on - a real
+        // room/house light needs to reach well beyond its own block, so the default (and the
+        // Properties panel slider's max) is much bigger now.
+        const distance = lightProps.distance !== undefined ? lightProps.distance : 30;
 
         const light = new THREE.PointLight(new THREE.Color(color), intensity, distance);
         light.position.set(0, 0, 0); // centered on the part - simplest, works for any shape/size
+        // Real shadows: other blocks/parts now actually block this light instead of it
+        // shining straight through walls/floors. Modest shadow-map size keeps this cheap
+        // enough to have several lights in a scene (e.g. a whole house) without tanking FPS.
+        light.castShadow = true;
+        light.shadow.mapSize.set(512, 512);
+        light.shadow.camera.near = 0.5;
+        light.shadow.camera.far = Math.max(distance, 1);
+        light.shadow.bias = -0.002;
         mesh.add(light);
         mesh.userData._light = light;
+
+        // Visible glow: a small unlit (MeshBasicMaterial, so it isn't itself shaded dark by
+        // other lights/shadows) sphere at the light's position, so the light source actually
+        // looks like something is glowing there - like a bulb/orb - rather than light coming
+        // from an invisible point in mid-air.
+        const glowRadius = 0.18 + Math.min(intensity, 3) * 0.08;
+        const glow = new THREE.Mesh(
+            new THREE.SphereGeometry(glowRadius, 12, 12),
+            new THREE.MeshBasicMaterial({ color: new THREE.Color(color) })
+        );
+        glow.position.set(0, 0, 0);
+        mesh.add(glow);
+        mesh.userData._lightGlow = glow;
 
         if (mesh.userData.serial) {
             mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, {
@@ -917,6 +947,12 @@ export class World {
         const mats = buildPartMaterials(material, color, true);
         const mesh = new THREE.Mesh(geo, mats);
         mesh.position.set(x, y, z);
+        // Blocks are by far the most common part type, so this is the one that matters most
+        // for the new part-lights actually casting/receiving shadows (see World.applyPartLight)
+        // - previously only spheres/cylinders/wedges had these flags set, so a light sitting
+        // in/near a block wall would shine straight through it with no shadow at all.
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         
         // Save serialization data
         mesh.userData.serial = {
