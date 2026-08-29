@@ -2437,6 +2437,8 @@ const BUNDLED_MODELS = [
     { id: 'BOAT0001', name: 'Retro Boat', url: './models/retro_boat.glb' },
     { id: 'SHARK0001', name: 'Bull Shark', url: './models/bull_shark.glb' },
     { id: 'AREA51001', name: 'Area 51', url: './models/area_51.glb' },
+    { id: 'AREA51LG1', name: 'Area 51 (Large)', url: './models/area_51_large.glb' },
+    { id: 'GLASSHM01', name: 'Glass Houses Map', url: './models/glass_houses.glb' },
 ];
 
 // Imports a .glb/.gltf model into the world. Three ways to call this:
