@@ -132,7 +132,9 @@ const renderer = new THREE.WebGLRenderer({ antialias: false });
 // needs this on. Basic (not PCFSoft) shadow type keeps the extra cost as low as possible
 // since maps can have several lit parts (e.g. a whole house full of lamps) at once.
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.BasicShadowMap;
+// Soft shadows: PCFSoft blurs shadow edges (BasicShadowMap gave hard, jagged edges).
+// Costs a bit more than Basic but is still cheap enough for this scene's typical light count.
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 renderer.domElement.style.imageRendering = 'pixelated';
 
@@ -1606,7 +1608,7 @@ function updateStudioPropertiesUI() {
             const lightProps = (m.userData.serial.props && m.userData.serial.props.light) || null;
             if (propInputs.lightEnabled) propInputs.lightEnabled.checked = !!(lightProps && lightProps.enabled);
             if (propInputs.lightColor) propInputs.lightColor.value = '#' + new THREE.Color((lightProps && lightProps.color) ?? 0xffffaa).getHexString();
-            if (propInputs.lightIntensity) propInputs.lightIntensity.value = (lightProps && lightProps.intensity !== undefined) ? lightProps.intensity : 1.5;
+            if (propInputs.lightIntensity) propInputs.lightIntensity.value = (lightProps && lightProps.intensity !== undefined) ? lightProps.intensity : 2.4;
             if (propInputs.lightDistance) propInputs.lightDistance.value = (lightProps && lightProps.distance !== undefined) ? lightProps.distance : 30;
         }
     }
@@ -1799,7 +1801,7 @@ const onPropChange = () => {
         world.applyPartLight(m, {
             enabled: propInputs.lightEnabled.checked,
             color: propInputs.lightColor ? new THREE.Color(propInputs.lightColor.value).getHex() : 0xffffaa,
-            intensity: propInputs.lightIntensity ? parseFloat(propInputs.lightIntensity.value) : 1.5,
+            intensity: propInputs.lightIntensity ? parseFloat(propInputs.lightIntensity.value) : 2.4,
             distance: propInputs.lightDistance ? parseFloat(propInputs.lightDistance.value) : 30
         });
     }
@@ -2423,17 +2425,63 @@ function base64ToArrayBuffer(base64) {
     return bytes.buffer;
 }
 
-// Imports a .glb/.gltf model into the world. Either pass `arrayBuffer` + `fileName` for a
-// brand-new import (from the file picker), or `savedData` to rebuild one that was saved
-// previously (see World.loadFromData/pendingModels) - its GLB bytes are stored as base64
-// in userData.serial.props.data so it round-trips through save/publish/reload like anything else.
-function spawnModel3D(savedData = null, arrayBuffer = null, fileName = 'model.glb') {
+
+// Ready-made 3D models bundled directly with the game (no upload needed) - each has a short
+// stable ID. When one of these is placed, the map only saves that ID (a few bytes) instead
+// of the model's full GLB data, so even a large map full of these never bloats the Publish
+// URL - the actual file is already sitting right there in the game's own files for everyone
+// who opens the link, the same way woodplanks.png/etc. already work for materials.
+const BUNDLED_MODELS = [
+    { id: 'RBLXCH01', name: 'Roblox Character', url: './models/roroblox1003.glb' },
+    { id: 'DUCKIE001', name: 'Rubber Duckie', url: './models/rubber_duckie.glb' },
+    { id: 'BOAT0001', name: 'Retro Boat', url: './models/retro_boat.glb' },
+    { id: 'SHARK0001', name: 'Bull Shark', url: './models/bull_shark.glb' },
+    { id: 'AREA51001', name: 'Area 51', url: './models/area_51.glb' },
+];
+
+// Imports a .glb/.gltf model into the world. Three ways to call this:
+//  - `bundledId` set: loads one of BUNDLED_MODELS by its ID (see above) - used both when
+//    placing one fresh from the Model picker, and when reloading a saved map that referenced
+//    one (only the ID was saved, not the model data itself).
+//  - `savedData` set (no bundledId in its props): rebuilds a previously-imported CUSTOM
+//    model whose GLB bytes were saved as base64 in userData.serial.props.data.
+//  - `arrayBuffer` + `fileName` set: a brand-new custom import from the file picker.
+function spawnModel3D(savedData = null, arrayBuffer = null, fileName = 'model.glb', bundledId = null) {
     const props = (savedData && savedData.props) || {};
+    const resolvedBundledId = bundledId || props.bundledId || null;
+
+    if (resolvedBundledId) {
+        const bundled = BUNDLED_MODELS.find(m => m.id === resolvedBundledId);
+        if (!bundled) {
+            addChatMessage('System', `Couldn't find bundled model "${resolvedBundledId}" - it may have been removed.`);
+            return;
+        }
+        fetch(bundled.url)
+            .then(r => {
+                if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+                return r.arrayBuffer();
+            })
+            .then(buffer => {
+                finishSpawnModel3D(buffer, bundled.name, savedData, { bundledId: bundled.id, name: bundled.name });
+            })
+            .catch(err => {
+                console.error('Failed to fetch bundled model:', err);
+                addChatMessage('System', `Failed to load "${bundled.name}": ${err.message}`);
+            });
+        return;
+    }
+
     const base64Data = props.data || (arrayBuffer ? arrayBufferToBase64(arrayBuffer) : null);
     const modelName = props.name || fileName;
     if (!base64Data) return;
     const bufferToLoad = arrayBuffer || base64ToArrayBuffer(base64Data);
+    finishSpawnModel3D(bufferToLoad, modelName, savedData, { data: base64Data, name: modelName });
+}
 
+// Shared tail-end of spawnModel3D: parses the GLB bytes (from wherever they came from) and
+// places the resulting mesh in the world. `savedProps` is what gets written into
+// userData.serial.props - either {bundledId, name} (tiny) or {data, name} (full embed).
+function finishSpawnModel3D(bufferToLoad, modelName, savedData, savedProps) {
     const loader = new GLTFLoader();
     loader.parse(bufferToLoad, '', (gltf) => {
         const modelRoot = gltf.scene || (gltf.scenes && gltf.scenes[0]);
@@ -2446,7 +2494,7 @@ function spawnModel3D(savedData = null, arrayBuffer = null, fileName = 'model.gl
             isModel3D: true,
             serial: {
                 type: 'model3d', w: 1, h: 1, d: 1, color: 0, flags: ['static'],
-                props: { data: base64Data, name: modelName }
+                props: savedProps
             }
         };
 
@@ -2484,6 +2532,54 @@ function spawnModel3D(savedData = null, arrayBuffer = null, fileName = 'model.gl
     });
 }
 
+// --- Model Picker (Model tool, or press U while in Studio): place a bundled ready-made
+// model with one click, or upload a custom .glb/.gltf of your own. Mirrors the U-key Hat
+// Picker's look and feel (see the avatar hat picker elsewhere in this file).
+const modelPicker = document.createElement('div');
+modelPicker.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1200; display:none; align-items:center; justify-content:center; font-family:sans-serif;';
+modelPicker.innerHTML = `
+    <div style="background:#1e1e1e; color:#fff; border-radius:10px; padding:20px; width:440px; max-width:90vw; max-height:80vh; display:flex; flex-direction:column; gap:12px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 style="margin:0; font-size:16px;">📦 Place a 3D Model</h3>
+            <button id="model-picker-close" style="background:none; border:none; color:#aaa; font-size:20px; cursor:pointer; line-height:1;">×</button>
+        </div>
+        <div id="model-picker-grid" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; overflow-y:auto; max-height:320px; padding:2px;"></div>
+        <div style="border-top:1px solid #3a3a3a; padding-top:12px;">
+            <button id="model-picker-upload-btn" style="width:100%; padding:8px; background:#3d7de0; color:#fff; border:none; border-radius:6px; cursor:pointer;">Upload your own .glb/.gltf</button>
+            <div style="font-size:11px; color:#888; margin-top:6px;">Bundled models above only save a tiny ID with the map, so they never make a Publish link long. Your own uploads are embedded in full, so they still count toward the link size.</div>
+        </div>
+    </div>
+`;
+document.body.appendChild(modelPicker);
+const modelPickerGrid = modelPicker.querySelector('#model-picker-grid');
+
+function renderModelPickerGrid() {
+    modelPickerGrid.innerHTML = '';
+    BUNDLED_MODELS.forEach((model) => {
+        const btn = document.createElement('button');
+        btn.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:6px; padding:10px 6px; background:#2a2a2a; border:1px solid #3a3a3a; border-radius:8px; color:#fff; cursor:pointer; font-size:12px;';
+        btn.innerHTML = `<div style="font-size:26px;">📦</div><div style="text-align:center; word-break:break-word;">${model.name}</div>`;
+        btn.onclick = () => {
+            spawnModel3D(null, null, model.name, model.id);
+            modelPicker.style.display = 'none';
+        };
+        modelPickerGrid.appendChild(btn);
+    });
+}
+
+modelPicker.querySelector('#model-picker-close').onclick = () => { modelPicker.style.display = 'none'; };
+modelPicker.addEventListener('click', (e) => { if (e.target === modelPicker) modelPicker.style.display = 'none'; });
+modelPicker.querySelector('#model-picker-upload-btn').onclick = () => {
+    modelPicker.style.display = 'none';
+    document.getElementById('model-file-input').click();
+};
+
+function openModelPicker() {
+    if (gameState !== 'STUDIO') return;
+    renderModelPickerGrid();
+    modelPicker.style.display = 'flex';
+}
+
 document.getElementById('tool-weapon').onclick = () => {
     playSwitch();
     const pos = camera.position.clone().add(new THREE.Vector3(0, -1, -5).applyQuaternion(camera.quaternion));
@@ -2504,7 +2600,7 @@ document.getElementById('tool-textblock').onclick = () => {
 
 document.getElementById('tool-model').onclick = () => {
     playSwitch();
-    document.getElementById('model-file-input').click();
+    openModelPicker();
 };
 document.getElementById('model-file-input').addEventListener('change', (e) => {
     const file = e.target.files && e.target.files[0];
@@ -2733,10 +2829,19 @@ hatUploadInput.addEventListener('change', async (e) => {
 window.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() !== 'u') return;
     if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
-    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
-    e.preventDefault();
-    if (hatPicker.style.display === 'flex') closeHatPicker();
-    else openHatPicker();
+    // U opens whichever picker makes sense for the current mode: the avatar Hat picker while
+    // actually playing/testing, or the 3D Model picker while editing in Studio (there's
+    // nothing to equip a hat onto in Studio, and no map-building to do mid-game, so the two
+    // never conflict).
+    if (gameState === 'PLAYING' || gameState === 'TEST') {
+        e.preventDefault();
+        if (hatPicker.style.display === 'flex') closeHatPicker();
+        else openHatPicker();
+    } else if (gameState === 'STUDIO') {
+        e.preventDefault();
+        if (modelPicker.style.display === 'flex') modelPicker.style.display = 'none';
+        else openModelPicker();
+    }
 });
 
 // Deals damage to whoever is at `targetId` (a room clientId): applies it directly if that's

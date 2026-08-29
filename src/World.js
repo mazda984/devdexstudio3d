@@ -471,7 +471,10 @@ export class World {
         }
 
         const color = lightProps.color !== undefined ? lightProps.color : 0xffffaa;
-        const intensity = lightProps.intensity !== undefined ? lightProps.intensity : 1.5;
+        // Was 1.5 - felt weak, especially against a properly-darkened night sky now that
+        // the skybox actually dims too (see setSkyboxDarkness). Brighter default so a
+        // placed light reads clearly instead of being a faint glow.
+        const intensity = lightProps.intensity !== undefined ? lightProps.intensity : 2.4;
         // Range used to default to 12 studs, which barely lit the block it was on - a real
         // room/house light needs to reach well beyond its own block, so the default (and the
         // Properties panel slider's max) is much bigger now.
@@ -482,8 +485,10 @@ export class World {
         // Real shadows: other blocks/parts now actually block this light instead of it
         // shining straight through walls/floors. Modest shadow-map size keeps this cheap
         // enough to have several lights in a scene (e.g. a whole house) without tanking FPS.
+        // PCFSoft (set on the renderer) blurs the edges so they don't look hard/jagged.
         light.castShadow = true;
         light.shadow.mapSize.set(512, 512);
+        light.shadow.radius = 3; // extra softness on top of PCFSoft's own blur
         light.shadow.camera.near = 0.5;
         light.shadow.camera.far = Math.max(distance, 1);
         light.shadow.bias = -0.002;
@@ -493,11 +498,14 @@ export class World {
         // Visible glow: a small unlit (MeshBasicMaterial, so it isn't itself shaded dark by
         // other lights/shadows) sphere at the light's position, so the light source actually
         // looks like something is glowing there - like a bulb/orb - rather than light coming
-        // from an invisible point in mid-air.
-        const glowRadius = 0.18 + Math.min(intensity, 3) * 0.08;
+        // from an invisible point in mid-air. Brightened/blended toward white at higher
+        // intensity so a strong light actually looks like it's glowing hot, not just a flat
+        // dot of its base color.
+        const glowRadius = 0.2 + Math.min(intensity, 4) * 0.09;
+        const glowColor = new THREE.Color(color).lerp(new THREE.Color(0xffffff), Math.min(intensity / 5, 0.5));
         const glow = new THREE.Mesh(
             new THREE.SphereGeometry(glowRadius, 12, 12),
-            new THREE.MeshBasicMaterial({ color: new THREE.Color(color) })
+            new THREE.MeshBasicMaterial({ color: glowColor })
         );
         glow.position.set(0, 0, 0);
         mesh.add(glow);
