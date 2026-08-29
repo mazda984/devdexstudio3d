@@ -155,6 +155,10 @@ const gameDetailMenu = document.getElementById('game-detail-menu');
 const custMenu = document.getElementById('customize-menu');
 const settingsMenu = document.getElementById('settings-menu');
 const chatContainer = document.getElementById('chat-container');
+// Whether the current PLAYING session came from a real Published link (see startGame()) -
+// chat is gated on this so it only shows up when actually sharing/playing a published game,
+// not while previewing/building in Studio.
+let isPublishedPlaySession = false;
 const btnExit = document.getElementById('btn-exit-game');
 const btnReset = document.getElementById('btn-reset-char');
 const playerList = document.getElementById('player-list');
@@ -573,6 +577,7 @@ room.subscribePresence((presence) => {
             });
             remotePlayers[id] = rp;
             addChatMessage("System", `${username} joined.`);
+            playSfx('join');
             // Give them our shirt/face right away rather than waiting for the next
             // periodic broadcast (see broadcastAppearance()) - they can't have received
             // any earlier one-shot broadcast since they weren't connected yet.
@@ -2694,19 +2699,84 @@ hatPicker.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.55);
 hatPicker.innerHTML = `
     <div style="background:#1e1e1e; color:#fff; border-radius:10px; padding:20px; width:420px; max-width:90vw; max-height:80vh; display:flex; flex-direction:column; gap:12px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-            <h3 style="margin:0; font-size:16px;">🎩 Choose a Hat</h3>
+            <h3 style="margin:0; font-size:16px;">🧑 Avatar</h3>
             <button id="hat-picker-close" style="background:none; border:none; color:#aaa; font-size:20px; cursor:pointer; line-height:1;">×</button>
         </div>
-        <div id="hat-picker-grid" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; overflow-y:auto; max-height:320px; padding:2px;"></div>
-        <div style="display:flex; gap:8px; border-top:1px solid #3a3a3a; padding-top:12px;">
-            <button id="hat-picker-remove" style="flex:1; padding:8px; background:#3a3a3a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Remove Hat</button>
-            <button id="hat-picker-upload-btn" style="flex:1; padding:8px; background:#3d7de0; color:#fff; border:none; border-radius:6px; cursor:pointer;">Upload .glb/.zip</button>
+        <div style="display:flex; gap:6px;">
+            <button id="avatar-tab-hats" style="flex:1; padding:8px; background:#3d7de0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold;">🎩 Hats</button>
+            <button id="avatar-tab-skin" style="flex:1; padding:8px; background:#2a2a2a; color:#fff; border:none; border-radius:6px; cursor:pointer;">🎨 Skin</button>
+        </div>
+        <div id="avatar-panel-hats">
+            <div id="hat-picker-grid" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; overflow-y:auto; max-height:280px; padding:2px;"></div>
+            <div style="display:flex; gap:8px; border-top:1px solid #3a3a3a; padding-top:12px; margin-top:12px;">
+                <button id="hat-picker-remove" style="flex:1; padding:8px; background:#3a3a3a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Remove Hat</button>
+                <button id="hat-picker-upload-btn" style="flex:1; padding:8px; background:#3d7de0; color:#fff; border:none; border-radius:6px; cursor:pointer;">Upload .glb/.zip</button>
+            </div>
+        </div>
+        <div id="avatar-panel-skin" style="display:none; flex-direction:column; gap:10px;">
+            <div style="font-size:12px; color:#888;">Set a color for each body part. Changes apply instantly and are visible to other players.</div>
+            <div id="skin-color-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:10px;"></div>
         </div>
         <input type="file" id="hat-picker-upload-input" accept=".glb,.zip" multiple style="display:none">
     </div>
 `;
 document.body.appendChild(hatPicker);
 const hatPickerGrid = hatPicker.querySelector('#hat-picker-grid');
+const avatarPanelHats = hatPicker.querySelector('#avatar-panel-hats');
+const avatarPanelSkin = hatPicker.querySelector('#avatar-panel-skin');
+const avatarTabHats = hatPicker.querySelector('#avatar-tab-hats');
+const avatarTabSkin = hatPicker.querySelector('#avatar-tab-skin');
+const skinColorGrid = hatPicker.querySelector('#skin-color-grid');
+
+const SKIN_PARTS = [
+    { key: 'head', label: 'Head' },
+    { key: 'torso', label: 'Torso' },
+    { key: 'leftArm', label: 'Left Arm' },
+    { key: 'rightArm', label: 'Right Arm' },
+    { key: 'leftLeg', label: 'Left Leg' },
+    { key: 'rightLeg', label: 'Right Leg' },
+];
+
+function renderSkinColorGrid() {
+    skinColorGrid.innerHTML = '';
+    SKIN_PARTS.forEach(({ key, label }) => {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; background:#2a2a2a; border:1px solid #3a3a3a; border-radius:6px; padding:8px;';
+        const currentHex = (player.appearance.colors && player.appearance.colors[key] !== undefined)
+            ? '#' + new THREE.Color(player.appearance.colors[key]).getHexString()
+            : '#ffffff';
+        wrap.innerHTML = `<span style="font-size:13px;">${label}</span><input type="color" data-part="${key}" value="${currentHex}" style="width:36px; height:28px; border:none; background:none; cursor:pointer;">`;
+        skinColorGrid.appendChild(wrap);
+    });
+    skinColorGrid.querySelectorAll('input[type=color]').forEach(input => {
+        input.addEventListener('input', () => {
+            const part = input.dataset.part;
+            const hex = new THREE.Color(input.value).getHex();
+            player.setPartColor(part, hex);
+            try {
+                const save = JSON.parse(localStorage.getItem('nblox_appearance') || '{}');
+                save.colors = player.appearance.colors;
+                localStorage.setItem('nblox_appearance', JSON.stringify(save));
+            } catch (e) {}
+            // Colors are small JSON, so they're fine to include in regular presence updates
+            // (see Player.serializeAppearance()) - no need for the heavier one-shot channel.
+            try { room.updatePresence({ appearance: player.serializeAppearance() }); } catch (e) {}
+        });
+    });
+}
+
+function switchAvatarTab(tab) {
+    const isHats = tab === 'hats';
+    avatarPanelHats.style.display = isHats ? 'block' : 'none';
+    avatarPanelSkin.style.display = isHats ? 'none' : 'flex';
+    avatarTabHats.style.background = isHats ? '#3d7de0' : '#2a2a2a';
+    avatarTabHats.style.fontWeight = isHats ? 'bold' : 'normal';
+    avatarTabSkin.style.background = isHats ? '#2a2a2a' : '#3d7de0';
+    avatarTabSkin.style.fontWeight = isHats ? 'normal' : 'bold';
+    if (!isHats) renderSkinColorGrid();
+}
+avatarTabHats.onclick = () => switchAvatarTab('hats');
+avatarTabSkin.onclick = () => switchAvatarTab('skin');
 
 function renderHatPickerGrid() {
     hatPickerGrid.innerHTML = '';
@@ -2781,6 +2851,7 @@ function removeEquippedHat() {
 
 function openHatPicker() {
     if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    switchAvatarTab('hats');
     renderHatPickerGrid();
     hatPicker.style.display = 'flex';
     if (document.pointerLockElement) document.exitPointerLock();
@@ -2867,6 +2938,28 @@ function dealDamageToClient(targetId, amount) {
 // like blast physics in Roblox-style games.
 // Also deals real damage: anyone (local player or a remote player) standing within
 // `radius` takes damage that falls off with distance, same curve as the knockback.
+// --- Sound effects (join, rocket launch/explosion, water splash) --------------------------
+// Plain one-shot Audio() instances, same pattern as the rest of the game's sounds - cloning
+// via .cloneNode() on each play so overlapping triggers (e.g. two rockets exploding close
+// together) don't cut each other off.
+let wasInWaterLastFrame = false; // tracks the player.inWater rising edge, see updatePlaying()
+const sfx = {
+    join: new Audio('./sounds/splat.wav'),
+    rocketLaunch: new Audio('./sounds/swoosh.wav'),
+    rocketExplode: new Audio('./sounds/explode.wav'),
+    waterSplash: new Audio('./sounds/impact_water.mp3'),
+};
+Object.values(sfx).forEach(a => { a.volume = 0.6; a.preload = 'auto'; });
+function playSfx(name, volume) {
+    const base = sfx[name];
+    if (!base) return;
+    try {
+        const inst = base.cloneNode();
+        inst.volume = volume !== undefined ? volume : base.volume;
+        inst.play().catch(() => {});
+    } catch (e) {}
+}
+
 function explodeAt(center, radius = 14, force = 55, damage = 0) {
     if (world.dynamicObjects) {
         world.dynamicObjects.forEach(part => {
@@ -2909,6 +3002,7 @@ function explodeAt(center, radius = 14, force = 55, damage = 0) {
     }
 
     spawnExplosionVFX(center);
+    playSfx('rocketExplode');
 }
 
 // Cheap explosion flash: an expanding, fading sphere removed shortly after.
@@ -2950,6 +3044,7 @@ function fireRocket() {
     scene.add(mesh);
 
     activeRockets.push({ mesh, velocity: dir.clone().multiplyScalar(55), spawnTime: now });
+    playSfx('rocketLaunch');
     playSwitch();
 }
 
@@ -4291,6 +4386,13 @@ function startGame(mapName, mapData = null, opts = {}) {
         const existingRid = existingParams.get('rid');
         const existingId = existingParams.get('id');
 
+        // Chat only shows up on an actual Published link (data=/bucket+rid=/id= present in
+        // the URL) - not when previewing a map from the local menu or from Studio's Play
+        // Test, matching how this game is meant to be shared/played for real vs. just being
+        // built. Computed here (not after this try block) since these params are only in
+        // scope inside it.
+        isPublishedPlaySession = !!(existingData || (existingBucket && existingRid) || existingId);
+
         // NOTE: no longer carrying over devdexItemImage/devdexItemType/devdexUsername here -
         // those reflect whatever's equipped on the Devdex site in this browser tab, not
         // anything about the map itself, so a saved/played link stays clean of them.
@@ -4321,15 +4423,18 @@ function startGame(mapName, mapData = null, opts = {}) {
     startMenu.style.display = 'none';
     studioGui.style.display = 'none';
 
-    chatContainer.style.display = 'none';
+    // Chat only shows up on an actual Published link (data=/bucket+rid=/id= present in the
+    // URL) - not when previewing a map from the local menu or from Studio's Play Test/Test,
+    // matching how this game is meant to be shared/played for real vs. just being built.
+    chatContainer.style.display = isPublishedPlaySession ? 'flex' : 'none';
     btnExit.style.display = 'none';
     btnReset.style.display = 'none';
     playerList.style.display = 'none';
 
     gameState = 'PLAYING';
     player.forcedAnim = null; // Reset forced animation from menu
-    
-    // Note: chat is always hidden now (see above), so we don't add a join message here.
+    playSfx('join');
+
     const username = document.getElementById('input-username').value || "Guest";
 
     if (mapData) {
@@ -6776,7 +6881,11 @@ function updatePlaying(dt) {
     }
 
     player.update(dt, controls, world, camera);
-    
+    // Splash sound the instant the player enters water (rising edge only, so it's one
+    // splash per entry, not every frame while submerged).
+    if (player.inWater && !wasInWaterLastFrame) playSfx('waterSplash');
+    wasInWaterLastFrame = !!player.inWater;
+
     world.update(dt); // Update cars and animations
 
     // Cursor Raycast
