@@ -1584,13 +1584,14 @@ function updateStudioPropertiesUI() {
     if (mat && mat.color) propInputs.color.value = '#' + (mat.color ? mat.color.getHexString() : 'cccccc');
     else if (propInputs.color) propInputs.color.value = '#cccccc';
     const isTextBlock = !!(m.userData && m.userData.serial && m.userData.serial.type === 'text_block');
+    const isTerrain = !!(m.userData && m.userData.serial && m.userData.serial.type === 'terrain');
     if (propInputs.material) {
         const matRow = propInputs.material.closest('.prop-row');
         // Material only applies to plain parts (block/sphere/cylinder/wedge) - RigBots/
-        // models/weapons already returned earlier above, and Text Blocks have their own
-        // fixed glass material (switching it would blow away the text texture), so exclude
-        // those too.
-        const applicable = !!(m.userData && m.userData.serial && m.userData.serial.type) && !isTextBlock;
+        // models/weapons already returned earlier above, and Text Blocks/Terrain have their
+        // own fixed materials (switching it would blow away the text texture / grass-basalt
+        // blend), so exclude those too.
+        const applicable = !!(m.userData && m.userData.serial && m.userData.serial.type) && !isTextBlock && !isTerrain;
         if (matRow) matRow.style.display = applicable ? '' : 'none';
         propInputs.material.value = (m.userData && m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
     }
@@ -1605,9 +1606,11 @@ function updateStudioPropertiesUI() {
     }
     // Light: available on any plain part (block/sphere/cylinder/wedge/text_block) - lets a
     // block act as a real light source (lamps, house lighting, etc.), not just visually lit.
+    // Excluded for Terrain: a single point light "centered" on a huge landscape mesh isn't
+    // a meaningful placement - place a lit block near the spot you actually want lit instead.
     const lightSection = document.getElementById('prop-section-light');
     if (lightSection) {
-        const lightApplicable = !!(m.userData && m.userData.serial && m.userData.serial.type);
+        const lightApplicable = !!(m.userData && m.userData.serial && m.userData.serial.type) && !isTerrain;
         lightSection.style.display = lightApplicable ? '' : 'none';
         if (lightApplicable) {
             const lightProps = (m.userData.serial.props && m.userData.serial.props.light) || null;
@@ -1782,8 +1785,8 @@ const onPropChange = () => {
 
     // Material (must run before the Colors block below so the freshly-rebuilt material
     // still picks up whatever color is currently in the color picker). Skipped for Text
-    // Blocks - they keep their own fixed glass material (see createTextBlock).
-    if (propInputs.material && (!m.userData.serial || m.userData.serial.type !== 'text_block')) {
+    // Blocks/Terrain - they keep their own fixed materials (see createTextBlock/createTerrain).
+    if (propInputs.material && (!m.userData.serial || (m.userData.serial.type !== 'text_block' && m.userData.serial.type !== 'terrain'))) {
         const wantedMat = propInputs.material.value;
         const currentMat = (m.userData.serial && m.userData.serial.props && m.userData.serial.props.material) || 'plastic';
         if (wantedMat !== currentMat) {
@@ -1802,7 +1805,8 @@ const onPropChange = () => {
     // Light: apply/update/remove a real PointLight on this part whenever the Light section's
     // fields change - lets blocks act as actual light sources (lamps, house lighting, etc.)
     // that are saved with the map and show up when Published/Played, not just visually here.
-    if (m.userData.serial && typeof world.applyPartLight === 'function' && propInputs.lightEnabled) {
+    // Skipped for Terrain (see updateStudioPropertiesUI's isTerrain comment).
+    if (m.userData.serial && m.userData.serial.type !== 'terrain' && typeof world.applyPartLight === 'function' && propInputs.lightEnabled) {
         world.applyPartLight(m, {
             enabled: propInputs.lightEnabled.checked,
             color: propInputs.lightColor ? new THREE.Color(propInputs.lightColor.value).getHex() : 0xffffaa,
@@ -1811,11 +1815,14 @@ const onPropChange = () => {
         });
     }
 
-    // Colors
+    // Colors: skipped for Terrain too - tinting would muddy the grass/rock textures, and
+    // terrain doesn't have a meaningful single "color" the way a plain block does.
     const col = new THREE.Color(propInputs.color.value);
-    if (Array.isArray(m.material)) m.material.forEach(mat => mat.color = col);
-    else m.material.color = col;
-    if (m.userData.serial) m.userData.serial.color = col.getHex();
+    if (!m.userData.serial || m.userData.serial.type !== 'terrain') {
+        if (Array.isArray(m.material)) m.material.forEach(mat => mat.color = col);
+        else m.material.color = col;
+        if (m.userData.serial) m.userData.serial.color = col.getHex();
+    }
 
     // Anchored: this actually drives physics now (see world.dynamicObjects handling in
     // updatePlaying) - turning it off also detaches the part from any RigBot it's welded to.
@@ -2411,6 +2418,18 @@ document.getElementById('tool-duplicate').onclick = () => {
         updateStudioSelection();
         updateExplorer(); // Refresh list
     }
+};
+
+// Terrain: places a fresh grass/basalt landscape patch in front of the camera. A new
+// random seed each time so repeated clicks give visibly different terrain, matching how
+// e.g. clicking "Block" repeatedly doesn't give you the exact same block back either.
+document.getElementById('tool-terrain').onclick = () => {
+    playSwitch();
+    const pos = camera.position.clone().add(new THREE.Vector3(0, -4, -20).applyQuaternion(camera.quaternion));
+    const terrain = world.createTerrain(pos.x, 0, pos.z, { seed: Math.floor(Math.random() * 1000000) });
+    studioSelected = terrain;
+    updateStudioSelection();
+    updateExplorer();
 };
 
 // --- 3D Model Import (GLB/GLTF) ---

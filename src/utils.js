@@ -140,3 +140,22 @@ export const materialTextures = {};
     }
 })();
 
+// Terrain textures (grass + basalt rock), tiled at a density that suits a big terrain patch
+// rather than a single 1-stud block (materialTextures above are tuned for the latter) - see
+// World.createTerrain()/buildTerrainMaterial().
+export const terrainTextures = {};
+(() => {
+    const loader = new THREE.TextureLoader();
+    const defs = { grass: './grass.png', basalt: './terrain_basalt.webp' };
+    for (const [key, path] of Object.entries(defs)) {
+        const tex = loader.load(path);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.repeat.set(10, 10);
+        terrainTextures[key] = tex;
+    }
+})();
+

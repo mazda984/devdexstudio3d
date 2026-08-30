@@ -9,7 +9,7 @@
     // removed: const heavyAnimatedDefinitions = {}
 */
 import * as THREE from 'three';
-import { boxUnwrapUVs, surfaceManager, materialTextures } from './utils.js';
+import { boxUnwrapUVs, surfaceManager, materialTextures, terrainTextures } from './utils.js';
 import { Vehicle } from './Vehicle.js';
 
 // Per-named-material physical tweaks layered on top of the base color+texture, so e.g.
@@ -21,6 +21,88 @@ const MATERIAL_PROPS = {
     metal: { roughness: 0.35, metalness: 0.6 },
     slate: { roughness: 0.95, metalness: 0 }
 };
+
+// --- Terrain: sculptable-style grass/basalt landscape (Roblox Terrain-inspired) ----------
+// Deterministic seeded noise (mulberry32 PRNG + a small hashed value-noise function) so a
+// terrain patch only needs to save {size, segments, seed, heightScale, roughness} - a few
+// bytes - and can regenerate the EXACT same heightmap on every device, rather than saving
+// a full per-vertex height array (which would be huge for any decently-sized terrain and
+// blow out the Publish URL for the exact same reason large 3D models used to).
+function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+        a |= 0; a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+function hashLattice(ix, iz, seed) {
+    let h = (ix * 374761393 + iz * 668265263 + seed * 2147483647) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h = h ^ (h >>> 16);
+    return ((h >>> 0) % 100000) / 100000;
+}
+
+// Smooth 2D value noise: bilinear-interpolates hashed lattice-point values with a
+// smoothstep ease, so neighboring points blend naturally instead of a blocky/random look.
+function valueNoise2D(x, z, seed) {
+    const x0 = Math.floor(x), z0 = Math.floor(z);
+    const sx = x - x0, sz = z - z0;
+    const smooth = (t) => t * t * (3 - 2 * t);
+    const n00 = hashLattice(x0, z0, seed), n10 = hashLattice(x0 + 1, z0, seed);
+    const n01 = hashLattice(x0, z0 + 1, seed), n11 = hashLattice(x0 + 1, z0 + 1, seed);
+    const ix0 = n00 + (n10 - n00) * smooth(sx);
+    const ix1 = n01 + (n11 - n01) * smooth(sx);
+    return ix0 + (ix1 - ix0) * smooth(sz);
+}
+
+// 4-octave fractal noise for natural-looking rolling hills + occasional steeper faces
+// (which is what triggers the basalt/rock blend in buildTerrainMaterial below).
+function fractalNoise2D(x, z, seed, roughness) {
+    let total = 0, amp = 1, maxAmp = 0, freq = 0.045 * roughness;
+    for (let o = 0; o < 4; o++) {
+        total += valueNoise2D(x * freq, z * freq, seed + o * 101) * amp;
+        maxAmp += amp;
+        amp *= 0.5;
+        freq *= 2.15;
+    }
+    return total / maxAmp; // ~0..1
+}
+
+// Builds the grass/basalt slope-blended terrain material. Uses MeshStandardMaterial +
+// onBeforeCompile (rather than a fully custom ShaderMaterial) specifically so the terrain
+// keeps reacting correctly to this game's real lights AND shadows (ambient/sun/part
+// PointLights) - a bare custom shader wouldn't pick any of that up automatically.
+// Blends by OBJECT-space normal.y (steepness), which is exactly the technique Roblox's own
+// terrain material blends grass-on-flat vs. rock-on-cliffs by.
+function buildTerrainMaterial() {
+    const mat = new THREE.MeshStandardMaterial({
+        map: terrainTextures.grass,
+        roughness: 0.95,
+        metalness: 0,
+    });
+    mat.onBeforeCompile = (shader) => {
+        shader.uniforms.basaltMap = { value: terrainTextures.basalt };
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nvarying vec3 vObjNormal;')
+            .replace('#include <begin_vertex>', '#include <begin_vertex>\nvObjNormal = normal;');
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', '#include <common>\nuniform sampler2D basaltMap;\nvarying vec3 vObjNormal;')
+            .replace('#include <map_fragment>', `
+                {
+                    vec4 grassSample = texture2D( map, vMapUv );
+                    vec4 rockSample = texture2D( basaltMap, vMapUv );
+                    float steepness = 1.0 - clamp( vObjNormal.y, 0.0, 1.0 );
+                    float rockBlend = smoothstep( 0.28, 0.62, steepness );
+                    vec4 blended = mix( grassSample, rockSample, rockBlend );
+                    diffuseColor *= blended;
+                }
+            `);
+    };
+    return mat;
+}
 
 // Builds the material(s) for a block/part given a color and an optional named material
 // ("wood" | "grass" | "fabric" | "water" | "metal" | "slate"). Falls back to the classic
@@ -518,6 +600,48 @@ export class World {
         }
     }
 
+    // Terrain: a Roblox-Terrain-inspired grass/basalt landscape patch. Height comes from
+    // deterministic seeded noise (see fractalNoise2D above) rather than being hand-sculpted,
+    // and grass vs. rock is chosen automatically per-pixel by how steep that spot is (see
+    // buildTerrainMaterial) - exactly like Roblox's own terrain material works, without
+    // needing a full brush-sculpting toolset to get a natural-looking landscape.
+    createTerrain(x, y, z, options = {}) {
+        const size = options.size || 60;
+        const segments = Math.min(160, Math.max(8, options.segments || 80));
+        const seed = options.seed !== undefined ? options.seed : Math.floor(Math.random() * 1000000);
+        const heightScale = options.heightScale !== undefined ? options.heightScale : 9;
+        const roughness = options.roughness !== undefined ? options.roughness : 1;
+
+        const geo = new THREE.PlaneGeometry(size, size, segments, segments);
+        geo.rotateX(-Math.PI / 2); // horizontal, so noise below is a height (Y), not a depth
+
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            const vx = pos.getX(i), vz = pos.getZ(i);
+            const n = fractalNoise2D(vx, vz, seed, roughness); // ~0..1
+            pos.setY(i, (n - 0.5) * 2 * heightScale);
+        }
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+
+        const material = buildTerrainMaterial();
+        const mesh = new THREE.Mesh(geo, material);
+        mesh.position.set(x, y, z);
+        mesh.name = 'Terrain';
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData.serial = {
+            type: 'terrain', w: size, h: heightScale, d: size, color: 0, flags: ['static'],
+            props: { size, segments, seed, heightScale, roughness }
+        };
+
+        this.mapGroup.add(mesh);
+        this.items.push(mesh);
+        this.collidables.push(mesh);
+        mesh.userData.collide = true;
+        return mesh;
+    }
+
     // Bird: simple decorative prop that bobs/drifts in place (spawned via the Studio
     // toolbox's "Bird" button). Lives here (rather than inline in main.js) so the exact
     // same construction code runs both when you place one AND when a saved/published map
@@ -799,6 +923,14 @@ export class World {
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
                     if (d.props && d.props.light) this.applyPartLight(mesh, d.props.light);
+                    placedCount++;
+                } else if (d.type === 'terrain') {
+                    const props = d.props || {};
+                    const mesh = this.createTerrain(d.x, d.y, d.z, {
+                        size: props.size, segments: props.segments, seed: props.seed,
+                        heightScale: props.heightScale, roughness: props.roughness
+                    });
+                    if (d.name) mesh.name = d.name;
                     placedCount++;
                 } else if (d.type === 'weapon_pickup') {
                     this.createWeaponPickup(d.x, d.y, d.z, (d.props && d.props.weaponType) || 'rocketlauncher');
