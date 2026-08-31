@@ -1194,6 +1194,19 @@ export class Player {
         const isWaterObj = (o) => !!(o && o.userData && o.userData.serial && o.userData.serial.props && o.userData.serial.props.material === 'water');
         const collidables = collidablesAll.filter(o => !isWaterObj(o));
         const waterVolumes = collidablesAll.filter(isWaterObj);
+        // Terrain is a big irregular heightmap mesh, not a box - but checkCollision()/
+        // resolveOverlap() below both approximate every collidable as an axis-aligned
+        // bounding box (fine for actual blocks, since a block's real shape IS its AABB).
+        // A terrain patch's AABB, though, spans its ENTIRE area from lowest valley to
+        // highest hill - so the moment the player's Y was anywhere in that range (which is
+        // true almost the whole time they're walking on it), the whole box read as "solid"
+        // and blocked every direction at once, including straight down into the ground they
+        // were already standing on - exactly what was showing up as "stuck, can't move,
+        // Unstuck! fires". Excluding terrain from the AABB-based checks fixes that; it stays
+        // in `collidables` (used below for the real per-triangle ground raycast, which is
+        // accurate for any shape) so standing on/walking over its actual surface still works.
+        const isTerrainObj = (o) => !!(o && o.userData && o.userData.serial && o.userData.serial.type === 'terrain');
+        const collidablesSolid = collidables.filter(o => !isTerrainObj(o));
 
         // Handle Death State
         if (this.isDead) {
@@ -1230,7 +1243,7 @@ export class Player {
 
                     // Debris Collision
                     const dBox = new THREE.Box3().setFromObject(d.mesh);
-                    for (const col of collidables) {
+                    for (const col of collidablesSolid) {
                         const cBox = new THREE.Box3().setFromObject(col);
                         if (dBox.intersectsBox(cBox)) {
                             // Find intersection
@@ -1378,7 +1391,7 @@ export class Player {
         // Apply movement with Collision Detection
         // X Axis
         const nextX = this.position.x + moveVec.x * dt;
-        if (this.checkCollision(nextX, this.position.y, this.position.z, collidables)) {
+        if (this.checkCollision(nextX, this.position.y, this.position.z, collidablesSolid)) {
             // Collision on X, don't move X
             this.velocity.x = 0;
         } else {
@@ -1387,7 +1400,7 @@ export class Player {
 
         // Z Axis
         const nextZ = this.position.z + moveVec.z * dt;
-        if (this.checkCollision(this.position.x, this.position.y, nextZ, collidables)) {
+        if (this.checkCollision(this.position.x, this.position.y, nextZ, collidablesSolid)) {
             // Collision on Z, don't move Z
             this.velocity.z = 0;
         } else {
@@ -1465,7 +1478,7 @@ export class Player {
         
         // Head collision (Ceiling)
         if (this.velocity.y > 0) {
-             if (this.checkCollision(this.position.x, this.position.y + 1, this.position.z, collidables)) {
+             if (this.checkCollision(this.position.x, this.position.y + 1, this.position.z, collidablesSolid)) {
                  this.velocity.y = 0;
              }
         }
@@ -1528,13 +1541,13 @@ export class Player {
         // resolveOverlap() above) - runs every frame, so a jump that clips into a block's
         // underside gets corrected immediately instead of leaving them wedged inside it.
         if (!this.isDead && !this.vehicle) {
-            this.resolveOverlap(collidables);
+            this.resolveOverlap(collidablesSolid);
             this.mesh.position.copy(this.position);
         }
 
         // Stuck detection: last-resort safety net for the rare case resolveOverlap() can't
         // find a clean way out (e.g. fully enclosed on every side) - teleport up and out.
-        if (!this.isDead && !this.vehicle && this.checkCollision(this.position.x, this.position.y, this.position.z, collidables)) {
+        if (!this.isDead && !this.vehicle && this.checkCollision(this.position.x, this.position.y, this.position.z, collidablesSolid)) {
             this.stuckTimer += dt;
             if (this.stuckTimer >= 2) {
                 this.teleport(this.position.clone().add(new THREE.Vector3(0, 15, 0)));

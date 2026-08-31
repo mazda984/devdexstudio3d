@@ -1620,6 +1620,18 @@ function updateStudioPropertiesUI() {
             if (propInputs.lightDistance) propInputs.lightDistance.value = (lightProps && lightProps.distance !== undefined) ? lightProps.distance : 30;
         }
     }
+    // Terrain Sculpt section: only shown for terrain objects. Turning sculpt mode off when
+    // switching away from a terrain (or deselecting) is important - otherwise a stray click
+    // on some other object while the toggle was still on could get misread as a sculpt input.
+    const terrainSection = document.getElementById('prop-section-terrain');
+    if (terrainSection) {
+        terrainSection.style.display = isTerrain ? '' : 'none';
+        if (!isTerrain && sculptModeActive) {
+            sculptModeActive = false;
+            const sculptToggle = document.getElementById('prop-sculpt-enabled');
+            if (sculptToggle) sculptToggle.checked = false;
+        }
+    }
     // Assuming Standard Material props, though our blocks use array
     if (mat) {
         propInputs.reflect.value = 0; // Placeholder
@@ -2431,6 +2443,57 @@ document.getElementById('tool-terrain').onclick = () => {
     updateStudioSelection();
     updateExplorer();
 };
+
+// --- Terrain Sculpt brush (Raise/Lower/Flatten/Smooth/Paint) - only active while Sculpt
+// Mode is checked AND a Terrain object is selected. Click-and-drag over the terrain to
+// paint/sculpt; each frame held is one more "dab" with the current brush.
+let sculptModeActive = false;
+let sculptBrush = { mode: 'raise', size: 8, strength: 1 };
+let isSculptMouseDown = false;
+let sculptEditsSaveThrottle = 0;
+
+const sculptEnabledCheckbox = document.getElementById('prop-sculpt-enabled');
+sculptEnabledCheckbox.addEventListener('change', () => {
+    sculptModeActive = sculptEnabledCheckbox.checked;
+});
+
+document.querySelectorAll('.sculpt-brush-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        sculptBrush.mode = btn.dataset.mode;
+        document.querySelectorAll('.sculpt-brush-btn').forEach(b => {
+            b.style.background = (b === btn) ? '#3d7de0' : '';
+            b.style.color = (b === btn) ? '#fff' : '';
+        });
+    });
+});
+document.querySelectorAll('.sculpt-brush-btn')[0].dispatchEvent(new Event('click')); // default: Raise selected
+
+document.getElementById('prop-sculpt-size').addEventListener('input', (e) => {
+    sculptBrush.size = parseFloat(e.target.value);
+});
+document.getElementById('prop-sculpt-strength').addEventListener('input', (e) => {
+    sculptBrush.strength = parseFloat(e.target.value);
+});
+
+// Saves the current sculpt strokes into userData.serial.props.edits (a sparse diff - see
+// World.getTerrainEdits) so they're actually included on Save/Publish, not just visible
+// locally. Called both periodically while dragging (so a crash/refresh mid-stroke doesn't
+// lose everything) and once more on mouseup to make sure the final state is captured.
+function saveSculptEdits(mesh) {
+    if (!mesh || !mesh.userData.serial || typeof world.getTerrainEdits !== 'function') return;
+    mesh.userData.serial.props.edits = world.getTerrainEdits(mesh);
+}
+
+window.addEventListener('mousedown', (e) => {
+    if (e.button === 0) isSculptMouseDown = true;
+});
+window.addEventListener('mouseup', (e) => {
+    if (e.button !== 0) return;
+    isSculptMouseDown = false;
+    if (sculptModeActive && studioSelected && studioSelected.userData.serial && studioSelected.userData.serial.type === 'terrain') {
+        saveSculptEdits(studioSelected);
+    }
+});
 
 // --- 3D Model Import (GLB/GLTF) ---
 function arrayBufferToBase64(buffer) {
@@ -6466,6 +6529,32 @@ function updateStudio(dt) {
 
     if (world.skyboxMesh) world.skyboxMesh.position.copy(camera.position);
 
+    // Terrain sculpting: while Sculpt Mode is on, a Terrain is selected, and the left mouse
+    // button is held, raycast the mouse against that terrain specifically and apply the
+    // current brush at the hit point every frame - this is what actually makes holding the
+    // mouse down "paint" a continuous stroke rather than a single dab per click.
+    if (sculptModeActive && isSculptMouseDown && studioSelected &&
+        studioSelected.userData.serial && studioSelected.userData.serial.type === 'terrain' &&
+        !input.isRightMouseDown && !input.isDraggingGizmo) {
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObject(studioSelected, true);
+        if (hits.length > 0) {
+            const changed = world.sculptTerrain(
+                studioSelected, hits[0].point, sculptBrush.mode,
+                sculptBrush.size, sculptBrush.strength * Math.min(dt, 0.05) * 12
+            );
+            if (changed) {
+                // Periodically refresh the saved sparse diff mid-stroke too (not just on
+                // mouseup) so a crash/refresh partway through a long stroke doesn't lose it.
+                sculptEditsSaveThrottle += dt;
+                if (sculptEditsSaveThrottle > 0.4) {
+                    sculptEditsSaveThrottle = 0;
+                    saveSculptEdits(studioSelected);
+                }
+            }
+        }
+    }
+
     // Selection Logic (Click)
     // We handle click in window event, but need to check if we are hovering gizmo
     if (!input.isDraggingGizmo && input.isLocked === false && !input.isRightMouseDown) {
@@ -6516,9 +6605,13 @@ window.addEventListener('mousedown', (e) => {
     if (e.target.closest('#studio-gui')) return; // Ignore if clicking UI
     if (e.button !== 0) return; // Only Left Click
     if (input.isDraggingGizmo) return;
-    
+
     // Fix: If clicking gizmo, don't select
     if (transformControl.axis !== null && activeTool !== 'select') return;
+
+    // Sculpting a terrain: don't let this click reselect/deselect - it's a brush stroke,
+    // not a selection action (see the per-frame sculpt logic in updateStudio()).
+    if (sculptModeActive && studioSelected && studioSelected.userData.serial && studioSelected.userData.serial.type === 'terrain') return;
 
     if (studioHovered) {
         studioSelected = studioHovered;

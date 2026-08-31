@@ -76,7 +76,10 @@ function fractalNoise2D(x, z, seed, roughness) {
 // keeps reacting correctly to this game's real lights AND shadows (ambient/sun/part
 // PointLights) - a bare custom shader wouldn't pick any of that up automatically.
 // Blends by OBJECT-space normal.y (steepness), which is exactly the technique Roblox's own
-// terrain material blends grass-on-flat vs. rock-on-cliffs by.
+// terrain material blends grass-on-flat vs. rock-on-cliffs by. A per-vertex `paintBlend`
+// attribute (-1 = "no override, use the automatic slope blend") lets the Paint brush (see
+// main.js's terrain sculpt tool) force specific spots to grass or rock regardless of slope,
+// on top of the automatic blending.
 function buildTerrainMaterial() {
     const mat = new THREE.MeshStandardMaterial({
         map: terrainTextures.grass,
@@ -86,16 +89,17 @@ function buildTerrainMaterial() {
     mat.onBeforeCompile = (shader) => {
         shader.uniforms.basaltMap = { value: terrainTextures.basalt };
         shader.vertexShader = shader.vertexShader
-            .replace('#include <common>', '#include <common>\nvarying vec3 vObjNormal;')
-            .replace('#include <begin_vertex>', '#include <begin_vertex>\nvObjNormal = normal;');
+            .replace('#include <common>', '#include <common>\nattribute float paintBlend;\nvarying vec3 vObjNormal;\nvarying float vPaintBlend;')
+            .replace('#include <begin_vertex>', '#include <begin_vertex>\nvObjNormal = normal;\nvPaintBlend = paintBlend;');
         shader.fragmentShader = shader.fragmentShader
-            .replace('#include <common>', '#include <common>\nuniform sampler2D basaltMap;\nvarying vec3 vObjNormal;')
+            .replace('#include <common>', '#include <common>\nuniform sampler2D basaltMap;\nvarying vec3 vObjNormal;\nvarying float vPaintBlend;')
             .replace('#include <map_fragment>', `
                 {
                     vec4 grassSample = texture2D( map, vMapUv );
                     vec4 rockSample = texture2D( basaltMap, vMapUv );
                     float steepness = 1.0 - clamp( vObjNormal.y, 0.0, 1.0 );
-                    float rockBlend = smoothstep( 0.28, 0.62, steepness );
+                    float slopeBlend = smoothstep( 0.28, 0.62, steepness );
+                    float rockBlend = vPaintBlend >= 0.0 ? vPaintBlend : slopeBlend;
                     vec4 blended = mix( grassSample, rockSample, rockBlend );
                     diffuseColor *= blended;
                 }
@@ -603,8 +607,12 @@ export class World {
     // Terrain: a Roblox-Terrain-inspired grass/basalt landscape patch. Height comes from
     // deterministic seeded noise (see fractalNoise2D above) rather than being hand-sculpted,
     // and grass vs. rock is chosen automatically per-pixel by how steep that spot is (see
-    // buildTerrainMaterial) - exactly like Roblox's own terrain material works, without
-    // needing a full brush-sculpting toolset to get a natural-looking landscape.
+    // buildTerrainMaterial) - matching Roblox's own terrain material. On top of that, the
+    // Sculpt brush (main.js) can raise/lower/smooth/paint specific spots by hand; those
+    // hand-edits are passed in as `options.edits` (a sparse {heights:{idx:h}, paint:{idx:v}}
+    // diff against the procedural base - see getTerrainEdits() below) so re-loading a
+    // sculpted terrain only needs to save the bits that were actually hand-edited, not a
+    // full per-vertex heightmap.
     createTerrain(x, y, z, options = {}) {
         const size = options.size || 60;
         const segments = Math.min(160, Math.max(8, options.segments || 80));
@@ -616,11 +624,24 @@ export class World {
         geo.rotateX(-Math.PI / 2); // horizontal, so noise below is a height (Y), not a depth
 
         const pos = geo.attributes.position;
+        const paintArr = new Float32Array(pos.count).fill(-1); // -1 = no paint override
         for (let i = 0; i < pos.count; i++) {
             const vx = pos.getX(i), vz = pos.getZ(i);
             const n = fractalNoise2D(vx, vz, seed, roughness); // ~0..1
             pos.setY(i, (n - 0.5) * 2 * heightScale);
         }
+        geo.setAttribute('paintBlend', new THREE.BufferAttribute(paintArr, 1));
+
+        const edits = options.edits;
+        if (edits && edits.heights) {
+            for (const idxStr in edits.heights) pos.setY(Number(idxStr), edits.heights[idxStr]);
+        }
+        if (edits && edits.paint) {
+            const paintAttr = geo.attributes.paintBlend;
+            for (const idxStr in edits.paint) paintAttr.setX(Number(idxStr), edits.paint[idxStr]);
+            paintAttr.needsUpdate = true;
+        }
+
         pos.needsUpdate = true;
         geo.computeVertexNormals();
 
@@ -632,7 +653,7 @@ export class World {
         mesh.receiveShadow = true;
         mesh.userData.serial = {
             type: 'terrain', w: size, h: heightScale, d: size, color: 0, flags: ['static'],
-            props: { size, segments, seed, heightScale, roughness }
+            props: { size, segments, seed, heightScale, roughness, edits: edits || null }
         };
 
         this.mapGroup.add(mesh);
@@ -640,6 +661,90 @@ export class World {
         this.collidables.push(mesh);
         mesh.userData.collide = true;
         return mesh;
+    }
+
+    // Sculpt brush: raises/lowers/flattens/smooths height, or paints a forced grass/rock
+    // spot, within `brushSize` studs of `worldPoint` (falls off smoothly toward the edge,
+    // like a real brush rather than a hard-edged circle). Call once per frame while the
+    // mouse is held over the terrain in Sculpt mode (see main.js) - each call is one "dab".
+    sculptTerrain(mesh, worldPoint, mode, brushSize = 6, strength = 1) {
+        if (!mesh || !mesh.geometry) return false;
+        const geo = mesh.geometry;
+        const pos = geo.attributes.position;
+        const paintAttr = geo.attributes.paintBlend;
+        const segments = (mesh.userData.serial && mesh.userData.serial.props && mesh.userData.serial.props.segments) || 80;
+        const cols = segments + 1;
+        const localPoint = mesh.worldToLocal(worldPoint.clone());
+        let changed = false;
+
+        for (let i = 0; i < pos.count; i++) {
+            const vx = pos.getX(i), vz = pos.getZ(i);
+            const dx = vx - localPoint.x, dz = vz - localPoint.z;
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist > brushSize) continue;
+            const t = 1 - dist / brushSize;
+            const falloff = t * t * (3 - 2 * t); // smoothstep - soft brush edge
+            changed = true;
+
+            if (mode === 'raise') {
+                pos.setY(i, pos.getY(i) + strength * falloff * 0.6);
+            } else if (mode === 'lower') {
+                pos.setY(i, pos.getY(i) - strength * falloff * 0.6);
+            } else if (mode === 'flatten') {
+                pos.setY(i, pos.getY(i) + (localPoint.y - pos.getY(i)) * falloff * 0.35);
+            } else if (mode === 'smooth') {
+                // Average with the 4 grid-adjacent vertices (PlaneGeometry vertices are laid
+                // out row-major, so neighbors are simple index arithmetic) - a cheap stand-in
+                // for a real Laplacian smooth, good enough to soften brush strokes/noise.
+                const row = Math.floor(i / cols), col = i % cols;
+                let sum = pos.getY(i), n = 1;
+                if (col > 0) { sum += pos.getY(i - 1); n++; }
+                if (col < cols - 1) { sum += pos.getY(i + 1); n++; }
+                if (row > 0) { sum += pos.getY(i - cols); n++; }
+                if (row < cols - 1) { sum += pos.getY(i + cols); n++; }
+                const avg = sum / n;
+                pos.setY(i, pos.getY(i) + (avg - pos.getY(i)) * falloff * 0.5);
+            } else if (mode === 'paintGrass' && paintAttr) {
+                paintAttr.setX(i, falloff > 0.5 ? 0 : paintAttr.getX(i));
+            } else if (mode === 'paintRock' && paintAttr) {
+                paintAttr.setX(i, falloff > 0.5 ? 1 : paintAttr.getX(i));
+            }
+        }
+
+        if (changed) {
+            pos.needsUpdate = true;
+            geo.computeVertexNormals();
+            if (paintAttr && (mode === 'paintGrass' || mode === 'paintRock')) paintAttr.needsUpdate = true;
+        }
+        return changed;
+    }
+
+    // Computes a sparse diff between the terrain's CURRENT geometry and what its procedural
+    // base (same seed/roughness/heightScale) would look like untouched - only the vertices a
+    // sculpt brush actually changed show up here. Called after a sculpt stroke ends (main.js)
+    // to refresh userData.serial.props.edits, which is what actually gets saved/published -
+    // so a heavily-sculpted terrain still only pays URL-size cost for what was hand-edited,
+    // not a full per-vertex heightmap regardless of how big/detailed the terrain is.
+    getTerrainEdits(mesh) {
+        const props = mesh.userData.serial && mesh.userData.serial.props;
+        if (!props) return null;
+        const { seed, roughness, heightScale } = props;
+        const pos = mesh.geometry.attributes.position;
+        const paintAttr = mesh.geometry.attributes.paintBlend;
+        const heights = {};
+        const paint = {};
+        for (let i = 0; i < pos.count; i++) {
+            const vx = pos.getX(i), vz = pos.getZ(i);
+            const baseH = (fractalNoise2D(vx, vz, seed, roughness) - 0.5) * 2 * heightScale;
+            const curH = pos.getY(i);
+            if (Math.abs(curH - baseH) > 0.01) heights[i] = Math.round(curH * 1000) / 1000;
+            if (paintAttr) {
+                const p = paintAttr.getX(i);
+                if (p >= 0) paint[i] = p;
+            }
+        }
+        if (Object.keys(heights).length === 0 && Object.keys(paint).length === 0) return null;
+        return { heights, paint };
     }
 
     // Bird: simple decorative prop that bobs/drifts in place (spawned via the Studio
@@ -928,7 +1033,8 @@ export class World {
                     const props = d.props || {};
                     const mesh = this.createTerrain(d.x, d.y, d.z, {
                         size: props.size, segments: props.segments, seed: props.seed,
-                        heightScale: props.heightScale, roughness: props.roughness
+                        heightScale: props.heightScale, roughness: props.roughness,
+                        edits: props.edits || null
                     });
                     if (d.name) mesh.name = d.name;
                     placedCount++;

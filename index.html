@@ -1242,6 +1242,30 @@
                     <input type="range" id="prop-light-distance" class="prop-val" min="2" max="80" step="1" value="30">
                 </div>
             </div>
+            <div id="prop-section-terrain" style="display:none;">
+                <div class="prop-header" style="background: #eee; font-weight: normal;">Terrain Sculpt</div>
+                <div class="prop-row">
+                    <span class="prop-label">Sculpt Mode</span>
+                    <input type="checkbox" id="prop-sculpt-enabled">
+                </div>
+                <div class="prop-row" style="flex-wrap:wrap; gap:4px;">
+                    <button type="button" class="sculpt-brush-btn" data-mode="raise" style="flex:1 1 45%; padding:4px;">⬆ Raise</button>
+                    <button type="button" class="sculpt-brush-btn" data-mode="lower" style="flex:1 1 45%; padding:4px;">⬇ Lower</button>
+                    <button type="button" class="sculpt-brush-btn" data-mode="flatten" style="flex:1 1 45%; padding:4px;">▭ Flatten</button>
+                    <button type="button" class="sculpt-brush-btn" data-mode="smooth" style="flex:1 1 45%; padding:4px;">〰 Smooth</button>
+                    <button type="button" class="sculpt-brush-btn" data-mode="paintGrass" style="flex:1 1 45%; padding:4px;">🌱 Paint Grass</button>
+                    <button type="button" class="sculpt-brush-btn" data-mode="paintRock" style="flex:1 1 45%; padding:4px;">🪨 Paint Rock</button>
+                </div>
+                <div class="prop-row">
+                    <span class="prop-label">Brush Size</span>
+                    <input type="range" id="prop-sculpt-size" class="prop-val" min="1" max="25" step="0.5" value="8">
+                </div>
+                <div class="prop-row">
+                    <span class="prop-label">Strength</span>
+                    <input type="range" id="prop-sculpt-strength" class="prop-val" min="0.1" max="3" step="0.1" value="1">
+                </div>
+                <div style="font-size:11px; color:#888; padding:2px 4px;">Turn on Sculpt Mode, pick a brush, then click-and-drag on the terrain.</div>
+            </div>
              <div class="prop-row">
                 <span class="prop-label">Transparency</span>
                 <input type="number" id="prop-trans" min="0" max="1" step="0.1" class="prop-val">
@@ -1458,7 +1482,7 @@
         </div>
     </div>
 
-    <div id="build-version-tag" style="position:fixed; bottom:2px; right:4px; z-index:99999; font-size:10px; color:rgba(255,255,255,0.35); font-family:sans-serif; pointer-events:none; text-shadow: 0 0 2px black;">build 2026-08-30-fix18-terrain</div>
+    <div id="build-version-tag" style="position:fixed; bottom:2px; right:4px; z-index:99999; font-size:10px; color:rgba(255,255,255,0.35); font-family:sans-serif; pointer-events:none; text-shadow: 0 0 2px black;">build 2026-08-30-fix19-sculpt-unstuck</div>
     <img id="custom-cursor" src="./ArrowFarCursor.png">
     
     <div id="chat-container">
@@ -1470,7 +1494,7 @@
     </div>
 
 
-    <script type="module" src="./src/main.js?v=fix18"></script>
+    <script type="module" src="./src/main.js?v=fix19"></script>
     <script>
         // Helper to update visual color blocks
         const ids = ['col-head', 'col-torso', 'col-larm', 'col-rarm', 'col-lleg', 'col-rleg'];
