@@ -9,6 +9,7 @@
     // removed: const heavyAnimatedDefinitions = {}
 */
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { boxUnwrapUVs, surfaceManager, materialTextures, terrainTextures } from './utils.js';
 import { Vehicle } from './Vehicle.js';
 
@@ -1067,7 +1068,30 @@ export class World {
     createWeaponPickup(x, y, z, weaponType = 'rocketlauncher') {
         const group = new THREE.Group();
 
-        if (weaponType === 'sword') {
+        if (weaponType === 'nokia') {
+            // Real GLB model (a "PSX-style Nokia phone") rather than built from primitives
+            // like the others - loaded asynchronously, so the group exists (and can be
+            // positioned/picked up/serialized) immediately, with the actual visual mesh
+            // filled in a moment later once the file finishes parsing.
+            const loader = new GLTFLoader();
+            loader.load('./models/nokia.glb', (gltf) => {
+                const model = gltf.scene || gltf.scenes[0];
+                model.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+                // Auto-fit to a hand-held size, same technique as the GLB hat models.
+                const box = new THREE.Box3().setFromObject(model);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                const maxDim = Math.max(size.x, size.y, size.z) || 1;
+                const fitScale = 0.5 / maxDim;
+                model.scale.setScalar(fitScale);
+                const box2 = new THREE.Box3().setFromObject(model);
+                model.position.y -= (box2.min.y + box2.max.y) / 2; // center vertically on the group origin
+                group.add(model);
+            }, undefined, (err) => {
+                console.warn('Failed to load Nokia model:', err);
+            });
+            group.name = 'Nokia';
+        } else if (weaponType === 'sword') {
             const bladeMat = new THREE.MeshStandardMaterial({ color: 0xd8d8d8, metalness: 0.7, roughness: 0.25 });
             const hiltMat = new THREE.MeshStandardMaterial({ color: 0x4a2e14, roughness: 0.8 });
             const guardMat = new THREE.MeshStandardMaterial({ color: 0xc9a227, metalness: 0.6, roughness: 0.4 });

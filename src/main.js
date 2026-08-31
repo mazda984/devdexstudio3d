@@ -2526,6 +2526,11 @@ const BUNDLED_MODELS = [
     { id: 'AREA51001', name: 'Area 51', url: './models/area_51.glb' },
     { id: 'AREA51LG1', name: 'Area 51 (Large)', url: './models/area_51_large.glb' },
     { id: 'GLASSHM01', name: 'Glass Houses Map', url: './models/glass_houses.glb' },
+    { id: 'SEGAGEN01', name: 'Sega Genesis', url: './models/sega_genesis.glb' },
+    { id: 'CHICKEN01', name: 'Chicken', url: './models/chicken.glb' },
+    { id: 'PINETREE1', name: 'Pine Tree', url: './models/pine_tree.glb' },
+    { id: 'GWSHARK01', name: 'Great White Shark', url: './models/great_white_shark.glb' },
+    { id: 'CROSSRD01', name: 'Crossroads', url: './models/crossroads.glb' },
 ];
 
 // Imports a .glb/.gltf model into the world. Three ways to call this:
@@ -2723,7 +2728,8 @@ const activeRockets = []; // { mesh, velocity, spawnTime }
 
 const WEAPON_INFO = {
     rocketlauncher: { label: 'Rocket Launcher', icon: '🚀', hint: 'Press E to pick up Rocket Launcher', equippedText: 'Rocket Launcher (Click to fire)' },
-    sword: { label: 'Sword', icon: '🗡️', hint: 'Press E to pick up Sword', equippedText: 'Sword (Click to swing)' }
+    sword: { label: 'Sword', icon: '🗡️', hint: 'Press E to pick up Sword', equippedText: 'Sword (Click to swing)' },
+    nokia: { label: 'Nokia', icon: '📱', hint: 'Press E to pick up Nokia', equippedText: 'Nokia (Click to play Flappy Bird)' }
 };
 
 // Small on-screen hint, created once and reused (kept out of index.html since it's purely
@@ -3272,15 +3278,48 @@ function resetWeaponState() {
 }
 
 
+// --- Nokia "tool": clicking while equipped opens a Flappy Bird webview overlay, closable
+// via its own Close button (or Esc). Mirrors the other full-screen panels' style/pattern.
+const flappyBirdOverlay = document.createElement('div');
+flappyBirdOverlay.style.cssText = 'position:fixed; inset:0; background:#000; z-index:2000; display:none; flex-direction:column;';
+flappyBirdOverlay.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#111; font-family:sans-serif;">
+        <span style="color:#fff; font-size:13px; opacity:0.7;">📱 Nokia - Flappy Bird</span>
+        <button id="flappy-close-btn" style="padding:8px 16px; background:#e74c3c; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold;">✕ Close</button>
+    </div>
+    <iframe id="flappy-iframe" src="about:blank" style="flex:1; border:none; width:100%; background:#fff;" allow="autoplay"></iframe>
+`;
+document.body.appendChild(flappyBirdOverlay);
+const flappyIframe = flappyBirdOverlay.querySelector('#flappy-iframe');
+
+function openFlappyBirdWebview() {
+    flappyIframe.src = 'https://flappybird.io/';
+    flappyBirdOverlay.style.display = 'flex';
+    if (document.pointerLockElement) document.exitPointerLock();
+}
+function closeFlappyBirdWebview() {
+    flappyBirdOverlay.style.display = 'none';
+    flappyIframe.src = 'about:blank'; // stop it running/making sound in the background
+    if ((gameState === 'PLAYING' || gameState === 'TEST') && !document.pointerLockElement) {
+        renderer.domElement.requestPointerLock().catch(() => {});
+    }
+}
+flappyBirdOverlay.querySelector('#flappy-close-btn').onclick = closeFlappyBirdWebview;
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && flappyBirdOverlay.style.display === 'flex') closeFlappyBirdWebview();
+});
+
 // Firing/attack input: left-click while equipped (only once pointer is locked, so this
 // doesn't hijack the very first click that requests pointer lock). Branches by weapon type -
-// a Rocket Launcher fires a projectile, a Sword does an instant close-range hit-check.
+// a Rocket Launcher fires a projectile, a Sword does an instant close-range hit-check, and
+// the Nokia opens the Flappy Bird webview instead of attacking with anything.
 window.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
     if (!document.pointerLockElement) return;
     if (!equippedWeapon) return;
-    if (equippedWeapon === 'sword') swingSword();
+    if (equippedWeapon === 'nokia') openFlappyBirdWebview();
+    else if (equippedWeapon === 'sword') swingSword();
     else fireRocket();
 });
 
