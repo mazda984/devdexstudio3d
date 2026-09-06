@@ -2718,7 +2718,7 @@ document.getElementById('model-file-input').addEventListener('change', (e) => {
 
 // --- Weapons: pickup/equip (persists in a 1-slot inventory HUD), firing/attacking, and
 // dealing real damage to players (local + networked) -----------------------------------
-let equippedWeapon = null; // null | 'rocketlauncher' | 'sword'
+let equippedWeapon = null; // null | 'rocketlauncher' | 'sword' | 'nokia' | 'buildtool'
 let nearbyWeaponPickup = null;
 let lastRocketFireTime = 0;
 let lastSwordSwingTime = 0;
@@ -2732,7 +2732,8 @@ const activeRockets = []; // { mesh, velocity, spawnTime }
 const WEAPON_INFO = {
     rocketlauncher: { label: 'Rocket Launcher', icon: '🚀', hint: 'Press E to pick up Rocket Launcher', equippedText: 'Rocket Launcher (Click to fire)' },
     sword: { label: 'Sword', icon: '🗡️', hint: 'Press E to pick up Sword', equippedText: 'Sword (Click to swing)' },
-    nokia: { label: 'Nokia', icon: '📱', hint: 'Press E to pick up Nokia', equippedText: 'Nokia (Click to play Flappy Bird)' }
+    nokia: { label: 'Nokia', icon: '📱', hint: 'Press E to pick up Nokia', equippedText: 'Nokia (Click to play Flappy Bird)' },
+    buildtool: { label: 'Build Tool', icon: '🔨', hint: 'Press E to pick up Build Tool', equippedText: 'Build Tool (Click to place a block)' }
 };
 
 // Small on-screen hint, created once and reused (kept out of index.html since it's purely
@@ -3314,8 +3315,8 @@ window.addEventListener('keydown', (e) => {
 
 // Firing/attack input: left-click while equipped (only once pointer is locked, so this
 // doesn't hijack the very first click that requests pointer lock). Branches by weapon type -
-// a Rocket Launcher fires a projectile, a Sword does an instant close-range hit-check, and
-// the Nokia opens the Flappy Bird webview instead of attacking with anything.
+// a Rocket Launcher fires a projectile, a Sword does an instant close-range hit-check, the
+// Nokia opens the Flappy Bird webview, and the Build Tool places a block at the crosshair.
 window.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
@@ -3323,6 +3324,7 @@ window.addEventListener('mousedown', (e) => {
     if (!equippedWeapon) return;
     if (equippedWeapon === 'nokia') openFlappyBirdWebview();
     else if (equippedWeapon === 'sword') swingSword();
+    else if (equippedWeapon === 'buildtool') placeBuildBlock();
     else fireRocket();
 });
 
@@ -3642,28 +3644,13 @@ function updateClockScripts() {
     });
 }
 
-// --- Build tool: press B during PLAYING/TEST to toggle Build Mode, then click to place a
-// block at your crosshair, Minecraft-style. Session-only (not saved into the map itself -
-// this is for live building-survival gameplay, not permanent map editing), but synced to
-// every other player currently in the game so everyone sees the same structure being built,
-// and attacking NPCs (see the clock/summon system above) can damage it.
+// --- Build tool: a Weapon-pickup-style tool (like Rocket Launcher/Sword/Nokia) - press E to
+// pick it up, then click while it's equipped to place a block at your crosshair,
+// Minecraft-style. Session-only (not saved into the map itself - this is for live
+// building-survival gameplay, not permanent map editing), but synced to every other player
+// currently in the game so everyone sees the same structure being built, and attacking NPCs
+// (see the clock/summon system above) can damage it.
 const BUILD_BLOCK_SIZE = 4;
-let buildModeActive = false;
-
-const buildModeHint = document.createElement('div');
-buildModeHint.style.cssText = 'position:fixed; bottom:100px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.65); color:#7CFC00; padding:6px 16px; border-radius:6px; font-family:sans-serif; font-size:14px; font-weight:bold; display:none; z-index:900; pointer-events:none;';
-buildModeHint.textContent = '🔨 Build Mode: click to place a block (B to exit)';
-document.body.appendChild(buildModeHint);
-
-window.addEventListener('keydown', (e) => {
-    if (e.key.toLowerCase() !== 'b') return;
-    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
-    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
-    e.preventDefault();
-    buildModeActive = !buildModeActive;
-    buildModeHint.style.display = buildModeActive ? 'block' : 'none';
-    addChatMessage('System', buildModeActive ? 'Build Mode ON - click to place blocks.' : 'Build Mode OFF.');
-});
 
 // Creates (or, if `id` already exists locally, no-ops) a built block at the given position -
 // shared by the local placer and by everyone else receiving the 'build_place' broadcast, so
@@ -3715,6 +3702,7 @@ function removeBuiltBlock(id) {
 // Places a new block at the crosshair (screen center), snapped to a grid so blocks line up
 // cleanly, sitting flush on top of whatever face was clicked - same idea as Minecraft
 // building. Broadcasts it so everyone else's client creates the identical block too.
+// Called from the main firing/attack mousedown handler when the Build Tool is equipped.
 function placeBuildBlock() {
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     const targets = [...world.collidables];
@@ -3732,15 +3720,8 @@ function placeBuildBlock() {
     const ownerName = document.getElementById('input-username').value || 'Guest';
     createBuiltBlock(id, pos.x, pos.y, pos.z, size, ownerId, ownerName);
     try { room.send({ type: 'build_place', id, x: pos.x, y: pos.y, z: pos.z, size, ownerId, ownerName }); } catch (e) {}
+    playSwitch();
 }
-
-window.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
-    if (!document.pointerLockElement) return;
-    if (!buildModeActive) return;
-    placeBuildBlock();
-});
 
 // Sends every built block this client currently knows about - used when a new player joins
 // (see the presence handler) so they see the whole structure built so far, not just blocks

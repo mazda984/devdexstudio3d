@@ -1221,6 +1221,26 @@ export class World {
             group.add(pommel);
 
             group.name = 'Sword';
+        } else if (weaponType === 'buildtool') {
+            // Simple hammer shape (handle + head) built from primitives, like Sword/Rocket
+            // Launcher - no GLB needed for this one.
+            const handleMat = new THREE.MeshStandardMaterial({ color: 0x5a3b1e, roughness: 0.85 });
+            const headMat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.6, roughness: 0.35 });
+
+            const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.9, 8), handleMat);
+            handle.position.set(0, -0.1, 0);
+            group.add(handle);
+
+            const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, 0.22), headMat);
+            head.position.set(0, 0.38, 0);
+            group.add(head);
+
+            const claw = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.22, 4), headMat);
+            claw.position.set(0.3, 0.38, 0);
+            claw.rotation.z = -Math.PI / 2;
+            group.add(claw);
+
+            group.name = 'BuildTool';
         } else {
             weaponType = 'rocketlauncher';
             const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2b2b2b });
