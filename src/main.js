@@ -582,6 +582,9 @@ room.subscribePresence((presence) => {
             // periodic broadcast (see broadcastAppearance()) - they can't have received
             // any earlier one-shot broadcast since they weren't connected yet.
             broadcastAppearance();
+            // Same idea for anything we've built so far with the Build tool - a newly
+            // joined player needs the full structure, not just blocks placed from now on.
+            broadcastBuildSync();
         }
         
         // Update
@@ -3550,6 +3553,212 @@ function setRigAttacksPlayer(rigMesh, shouldAttack) {
     else if (!shouldAttack && idx !== -1) world.attackingRigs.splice(idx, 1);
 }
 
+// --- Clock scripts (`create: clock(...)` / `clock: name! finished=true ...`) -------------
+// A small top-of-screen HUD for any clock with shwscr=true, plus the "summon npc" action
+// that a `clock:` finish-rule can trigger.
+const clockHud = document.createElement('div');
+clockHud.style.cssText = 'position:fixed; top:10px; left:50%; transform:translateX(-50%); display:none; flex-direction:column; align-items:center; gap:4px; z-index:900; pointer-events:none; font-family:sans-serif;';
+document.body.appendChild(clockHud);
+
+function updateClockHUD() {
+    const rules = (world.scriptRules || []).filter(r => r.event === 'create_clock' && r.shwscr);
+    if (rules.length === 0) { clockHud.style.display = 'none'; return; }
+    clockHud.style.display = 'flex';
+    clockHud.innerHTML = rules.map(rule => {
+        const clock = world.clocks[rule.name];
+        const remaining = clock ? Math.max(0, Math.ceil(clock.remaining)) : Math.ceil(rule.duration);
+        return `<div style="background:rgba(0,0,0,0.6); color:#ff5555; padding:6px 18px; border-radius:6px; font-size:20px; font-weight:bold; text-shadow:0 1px 2px rgba(0,0,0,0.8);">${rule.name}: ${remaining}s</div>`;
+    }).join('');
+}
+
+// Spawns an attacking NPC "around" the block named in the rule's tpTo target (or the player,
+// if no target/target not found), for a clock's `summon npc?` finish-action. Deliberately
+// lightweight compared to spawnRig() (the Studio placement tool) - no click-to-speak, no
+// Explorer/PlayerList bookkeeping, since this is a disposable wave-spawn, not a map object.
+function summonClockNpc(rule) {
+    const spawner = rule.tpToName ? world.items.find(o => o.name === rule.tpToName) : null;
+    const basePos = spawner ? spawner.position.clone() : player.position.clone();
+    const angle = Math.random() * Math.PI * 2;
+    const radius = 3 + Math.random() * 5;
+    const pos = basePos.clone().add(new THREE.Vector3(Math.cos(angle) * radius, 3, Math.sin(angle) * radius));
+
+    const materialsStore = {};
+    const npcMesh = createPlayerMesh(materialsStore);
+    npcMesh.name = 'ClockNPC';
+    npcMesh.position.copy(pos);
+    npcMesh.userData = {
+        isRig: true,
+        id: 'npc-' + Date.now() + '-' + Math.floor(Math.random() * 100000),
+        attacksPlayer: !!rule.flags.attack,
+        isClockNpc: true,
+        clockName: rule.clockName,
+        velocityY: 0,
+        meleeCooldown: 0,
+    };
+    // Dark reddish tint so a "zombie wave" reads as visually distinct from normal RigBots.
+    const torso = npcMesh.children[0];
+    if (torso && torso.material) {
+        (Array.isArray(torso.material) ? torso.material : [torso.material]).forEach(m => { if (m && m.color) m.color.setHex(0x5a2020); });
+    }
+
+    world.mapGroup.add(npcMesh);
+    world.items.push(npcMesh);
+    if (npcMesh.userData.attacksPlayer) world.attackingRigs.push(npcMesh);
+
+    const clock = world.clocks[rule.clockName];
+    if (clock) { clock.npcs = clock.npcs || []; clock.npcs.push(npcMesh); }
+}
+
+// Removes every NPC a given clock has summoned so far - called right as that clock finishes
+// a cycle (i.e. resets), so each new wave starts clean instead of piling up on old ones.
+function despawnClockNpcs(clockName) {
+    const clock = world.clocks[clockName];
+    if (!clock || !clock.npcs || clock.npcs.length === 0) return;
+    clock.npcs.forEach(npc => {
+        if (npc.parent) npc.parent.remove(npc);
+        const i1 = world.items.indexOf(npc); if (i1 !== -1) world.items.splice(i1, 1);
+        const i2 = world.attackingRigs.indexOf(npc); if (i2 !== -1) world.attackingRigs.splice(i2, 1);
+    });
+    clock.npcs = [];
+}
+
+// Called once per frame during PLAYING/TEST: advances every clock's countdown and fires
+// `clock:` finish-rules the moment their clock completes a cycle.
+function updateClockScripts() {
+    if (typeof world.updateClocks !== 'function') return;
+    world.updateClocks();
+    updateClockHUD();
+
+    const finishRules = (world.scriptRules || []).filter(r => r.event === 'clock_finished');
+    finishRules.forEach(rule => {
+        const clock = world.clocks[rule.clockName];
+        if (!clock || !clock.justFinished) return;
+        // A refresh clears the previous wave before the new one spawns - matches "sayaç
+        // yenilendiğinde npcler silinecek" (NPCs get deleted when the timer refreshes).
+        despawnClockNpcs(rule.clockName);
+        if (rule.action === 'summon' && rule.entityType === 'npc') {
+            summonClockNpc(rule);
+        }
+    });
+}
+
+// --- Build tool: press B during PLAYING/TEST to toggle Build Mode, then click to place a
+// block at your crosshair, Minecraft-style. Session-only (not saved into the map itself -
+// this is for live building-survival gameplay, not permanent map editing), but synced to
+// every other player currently in the game so everyone sees the same structure being built,
+// and attacking NPCs (see the clock/summon system above) can damage it.
+const BUILD_BLOCK_SIZE = 4;
+let buildModeActive = false;
+
+const buildModeHint = document.createElement('div');
+buildModeHint.style.cssText = 'position:fixed; bottom:100px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.65); color:#7CFC00; padding:6px 16px; border-radius:6px; font-family:sans-serif; font-size:14px; font-weight:bold; display:none; z-index:900; pointer-events:none;';
+buildModeHint.textContent = '🔨 Build Mode: click to place a block (B to exit)';
+document.body.appendChild(buildModeHint);
+
+window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() !== 'b') return;
+    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    e.preventDefault();
+    buildModeActive = !buildModeActive;
+    buildModeHint.style.display = buildModeActive ? 'block' : 'none';
+    addChatMessage('System', buildModeActive ? 'Build Mode ON - click to place blocks.' : 'Build Mode OFF.');
+});
+
+// Creates (or, if `id` already exists locally, no-ops) a built block at the given position -
+// shared by the local placer and by everyone else receiving the 'build_place' broadcast, so
+// every client ends up with an identical block regardless of who actually placed it.
+function createBuiltBlock(id, x, y, z, size, ownerId, ownerName) {
+    if (world.builtBlocks.some(b => b.userData.buildId === id)) return null;
+    const mat = new THREE.MeshStandardMaterial({ color: 0xb08968, roughness: 0.9, transparent: true, opacity: 1 });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.name = 'BuiltBlock';
+    mesh.userData.buildId = id;
+    mesh.userData.ownerId = ownerId;
+    mesh.userData.ownerName = ownerName || 'Someone';
+    mesh.userData.health = 100;
+    mesh.userData.maxHealth = 100;
+    world.mapGroup.add(mesh);
+    world.collidables.push(mesh);
+    world.builtBlocks.push(mesh);
+    return mesh;
+}
+
+// Applies damage and updates the visible transparency (more damage = more see-through, so
+// everyone can tell at a glance how close a wall is to breaking) - called both by whichever
+// client's NPC actually landed the hit AND by everyone else via the 'build_damage' broadcast,
+// so the block's health/appearance stays identical for all players regardless of who dealt it.
+function damageBuiltBlock(id, amount) {
+    const block = world.builtBlocks.find(b => b.userData.buildId === id);
+    if (!block) return;
+    block.userData.health = Math.max(0, block.userData.health - amount);
+    const pct = block.userData.health / block.userData.maxHealth;
+    block.material.opacity = 0.12 + pct * 0.88; // floor so a near-dead block is still visible
+    if (block.userData.health <= 0) removeBuiltBlock(id);
+}
+
+function removeBuiltBlock(id) {
+    const idx = world.builtBlocks.findIndex(b => b.userData.buildId === id);
+    if (idx === -1) return;
+    const block = world.builtBlocks[idx];
+    if (block.parent) block.parent.remove(block);
+    const ci = world.collidables.indexOf(block);
+    if (ci !== -1) world.collidables.splice(ci, 1);
+    block.geometry.dispose();
+    block.material.dispose();
+    world.builtBlocks.splice(idx, 1);
+}
+
+// Places a new block at the crosshair (screen center), snapped to a grid so blocks line up
+// cleanly, sitting flush on top of whatever face was clicked - same idea as Minecraft
+// building. Broadcasts it so everyone else's client creates the identical block too.
+function placeBuildBlock() {
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const targets = [...world.collidables];
+    const hits = raycaster.intersectObjects(targets, true);
+    if (hits.length === 0 || !hits[0].face) return;
+
+    const size = BUILD_BLOCK_SIZE;
+    const pos = hits[0].point.clone().addScaledVector(hits[0].face.normal, size / 2);
+    pos.x = Math.round(pos.x / size) * size;
+    pos.y = Math.round(pos.y / size) * size;
+    pos.z = Math.round(pos.z / size) * size;
+
+    const id = 'build-' + (room && room.clientId ? room.clientId : 'local') + '-' + Date.now() + '-' + Math.floor(Math.random() * 10000);
+    const ownerId = room ? room.clientId : null;
+    const ownerName = document.getElementById('input-username').value || 'Guest';
+    createBuiltBlock(id, pos.x, pos.y, pos.z, size, ownerId, ownerName);
+    try { room.send({ type: 'build_place', id, x: pos.x, y: pos.y, z: pos.z, size, ownerId, ownerName }); } catch (e) {}
+}
+
+window.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
+    if (!document.pointerLockElement) return;
+    if (!buildModeActive) return;
+    placeBuildBlock();
+});
+
+// Sends every built block this client currently knows about - used when a new player joins
+// (see the presence handler) so they see the whole structure built so far, not just blocks
+// placed after they arrived.
+function broadcastBuildSync() {
+    if (!world.builtBlocks || world.builtBlocks.length === 0) return;
+    try {
+        room.send({
+            type: 'build_sync',
+            blocks: world.builtBlocks.map(b => ({
+                id: b.userData.buildId, x: b.position.x, y: b.position.y, z: b.position.z,
+                size: b.geometry.parameters.width, ownerId: b.userData.ownerId,
+                ownerName: b.userData.ownerName, health: b.userData.health
+            }))
+        });
+    } catch (e) {}
+}
+
 // --- Rig Bot & Studio Day/Night: spawn rig, speak, toggle lighting ---
 // savedData: optional { x,y,z, rx,ry,rz, props:{ attacksPlayer, color } } used to
 // reconstruct a RigBot that was previously saved (see World.loadFromData/pendingRigs).
@@ -4303,6 +4512,38 @@ room.onmessage = (evt) => {
                     rp.applyAppearance(payload);
                 }
             }
+            return;
+
+        }
+
+        if (data.type === 'build_place') {
+            // Someone (possibly us, via our own broadcast) placed a Build-tool block -
+            // createBuiltBlock() already no-ops if this id is already known locally, so this
+            // is safe to receive as an echo of our own placement too.
+            createBuiltBlock(data.id, data.x, data.y, data.z, data.size, data.ownerId, data.ownerName);
+            return;
+        }
+
+        if (data.type === 'build_damage') {
+            // Whoever's NPC actually landed the hit already applied this locally before
+            // broadcasting - applying it again here is harmless (damageBuiltBlock clamps at
+            // 0 and removeBuiltBlock no-ops if already gone), and is what keeps every other
+            // player's copy of the block in sync (same health, same transparency).
+            damageBuiltBlock(data.id, data.amount || 0);
+            return;
+        }
+
+        if (data.type === 'build_sync') {
+            // Full snapshot of everything the sender has built so far - sent to a newly
+            // joined player (see the presence handler) so they see the whole structure,
+            // not just blocks placed after they connected.
+            (data.blocks || []).forEach(b => {
+                const block = createBuiltBlock(b.id, b.x, b.y, b.z, b.size, b.ownerId, b.ownerName);
+                if (block && typeof b.health === 'number') {
+                    block.userData.health = b.health;
+                    block.material.opacity = 0.12 + (b.health / block.userData.maxHealth) * 0.88;
+                }
+            });
             return;
         }
 
@@ -6881,9 +7122,13 @@ function updatePlaying(dt) {
     // ifpart:touch <blockName> command? rules: checks every unanchored/moving part against
     // its target block every frame (part-vs-part contact, not player touch).
     world.updatePartTouchScripts();
+    // create: clock(...) / clock: name! finished=true ... rules (countdown HUD + NPC waves).
+    updateClockScripts();
 
     // RigBot Physics/AI: every RigBot falls with gravity like the player; ones with
-    // "Attacks Player" enabled also walk toward the player while grounded.
+    // "Attacks Player" enabled also walk toward the player (or a nearer built block - see
+    // the Build tool - if one's in the way, giving built structures an actual defensive
+    // purpose) while grounded, and deal real melee damage once in range.
     if (world.items && world.items.length > 0) {
         const RIG_GRAVITY = -100;
         const RIG_SPEED = 3.2; // units/sec, deliberately slower than the player can walk
@@ -6893,15 +7138,41 @@ function updatePlaying(dt) {
         world.items.forEach(rig => {
             if (!rig.userData || !rig.userData.isRig) return;
             if (rig.userData.velocityY === undefined) rig.userData.velocityY = 0;
+            if (rig.userData.meleeCooldown === undefined) rig.userData.meleeCooldown = 0;
+            rig.userData.meleeCooldown -= dt;
 
-            // Chase the player (horizontal only) if this RigBot is set to attack.
+            // Chase the player (horizontal only) if this RigBot is set to attack - or, if a
+            // built block is closer than the player and within "notice" range, attack that
+            // instead (so structures actually block/absorb attackers rather than being
+            // walked straight through).
             if (rig.userData.attacksPlayer && !player.isDead) {
-                const toPlayer = new THREE.Vector3().subVectors(player.mesh.position, rig.position);
-                toPlayer.y = 0;
-                if (toPlayer.length() > 1.2) {
-                    toPlayer.normalize();
-                    rig.position.addScaledVector(toPlayer, RIG_SPEED * dt);
-                    rig.rotation.y = Math.atan2(toPlayer.x, toPlayer.z);
+                let nearestBlock = null, nearestBlockDist = Infinity;
+                (world.builtBlocks || []).forEach(b => {
+                    const d = rig.position.distanceTo(b.position);
+                    if (d < nearestBlockDist) { nearestBlockDist = d; nearestBlock = b; }
+                });
+                const distToPlayer = rig.position.distanceTo(player.mesh.position);
+                const targetIsBlock = nearestBlock && nearestBlockDist < distToPlayer && nearestBlockDist < 20;
+                const targetPos = targetIsBlock ? nearestBlock.position : player.mesh.position;
+                const meleeRange = targetIsBlock ? 4.5 : 2.6;
+
+                const toTarget = new THREE.Vector3().subVectors(targetPos, rig.position);
+                const flatDist = Math.hypot(toTarget.x, toTarget.z);
+                toTarget.y = 0;
+
+                if (flatDist > meleeRange) {
+                    toTarget.normalize();
+                    rig.position.addScaledVector(toTarget, RIG_SPEED * dt);
+                    rig.rotation.y = Math.atan2(toTarget.x, toTarget.z);
+                } else if (rig.userData.meleeCooldown <= 0) {
+                    rig.userData.meleeCooldown = 1.0; // 1 hit/sec
+                    if (targetIsBlock) {
+                        const dmg = 12;
+                        damageBuiltBlock(nearestBlock.userData.buildId, dmg);
+                        try { room.send({ type: 'build_damage', id: nearestBlock.userData.buildId, amount: dmg }); } catch (e) {}
+                    } else {
+                        player.takeDamage(8);
+                    }
                 }
             }
 

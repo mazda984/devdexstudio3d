@@ -153,6 +153,14 @@ export class World {
         // RigBots flagged to attack the player live here so Player.js can hit-test them
         // the same way it already hit-tests killBricks.
         this.attackingRigs = [];
+        // Named countdown clocks from `create: clock(...)` script rules - see
+        // updateClocks() below. Keyed by clock name.
+        this.clocks = {};
+        // Player-placed blocks from the in-game Build tool (main.js) - session-only (not
+        // saved into the map itself), but synced across everyone currently playing so
+        // "one player builds it, everyone sees it" - see main.js's build_place/build_damage
+        // networking.
+        this.builtBlocks = [];
         // Same idea as pendingRigs but for imported 3D models (GLB/GLTF) - main.js
         // owns the GLTFLoader, so World just queues the raw saved data on load.
         this.pendingModels = [];
@@ -257,6 +265,8 @@ export class World {
         // main.js), so loadFromData() queues raw rig data here for main.js to spawn.
         this.pendingRigs = [];
         this.attackingRigs = [];
+        this.clocks = {};
+        this.builtBlocks = [];
         this.pendingModels = [];
         this.dynamicObjects = [];
         this.pendingWelds = [];
@@ -369,6 +379,54 @@ export class World {
             if (partTouchMatch) {
                 const [, blockName, commandRaw, rest] = partTouchMatch;
                 rules.push({ event: 'parttouch', blockName, command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
+                continue;
+            }
+
+            // create: clock(<seconds>) "<name>" tick=true shwscr=true
+            // Defines a named countdown clock. tick=true means it's cyclic - it counts down
+            // from <seconds>, and the instant it hits 0 it immediately starts over again
+            // (synced across every player automatically - see World.updateClocks() for why).
+            // shwscr=true shows it as a countdown in the top-of-screen HUD.
+            const clockCreateMatch = line.match(/^create:\s*clock\(\s*(\d+(?:\.\d+)?)\s*\)\s*"([^"]+)"\s*(.*)$/i);
+            if (clockCreateMatch) {
+                const [, durationStr, name, flagsStr] = clockCreateMatch;
+                const flags = {};
+                (flagsStr.match(/(\w+)\s*=\s*(true|false)/gi) || []).forEach(pair => {
+                    const [k, v] = pair.split('=').map(s => s.trim().toLowerCase());
+                    flags[k] = v === 'true';
+                });
+                rules.push({
+                    event: 'create_clock', name, duration: parseFloat(durationStr),
+                    tick: !!flags.tick, shwscr: !!flags.shwscr, raw: line
+                });
+                continue;
+            }
+
+            // clock: <name>! finished=true <action> <entityType>? [key=value ...] [tpTo? <blockName>]
+            // Fires every time the named clock finishes a countdown (which, for a tick=true
+            // clock, is also the exact moment it resets and starts counting down again - so
+            // "on finish" doubles as "on refresh", matching how a wave timer naturally works:
+            // clear out the old wave right as the new one begins).
+            const clockFinishMatch = line.match(/^clock:\s*(\S+?)!\s*finished\s*=\s*true\s+(.*)$/i);
+            if (clockFinishMatch) {
+                const [, clockName, rest] = clockFinishMatch;
+                const tokens = rest.trim().split(/\s+/).filter(Boolean);
+                const action = (tokens.shift() || '').toLowerCase();
+                let entityType = null, tpToName = null;
+                const flags = {};
+                for (let i = 0; i < tokens.length; i++) {
+                    const tok = tokens[i];
+                    if (/^tpto\??$/i.test(tok)) { tpToName = tokens[++i]; continue; }
+                    const eqIdx = tok.indexOf('=');
+                    if (eqIdx !== -1) {
+                        const k = tok.slice(0, eqIdx).toLowerCase();
+                        const v = tok.slice(eqIdx + 1).toLowerCase();
+                        flags[k] = v === 'true';
+                        continue;
+                    }
+                    if (!entityType) entityType = tok.replace(/\?$/, '').toLowerCase();
+                }
+                rules.push({ event: 'clock_finished', clockName, action, entityType, flags, tpToName, raw: line });
                 continue;
             }
         }
@@ -509,6 +567,51 @@ export class World {
             default:
                 console.warn(`Unknown ifpart:touch command "${rule.command}" in rule: ${rule.raw}`);
         }
+    }
+
+    // Updates every `create: clock(...)` rule's countdown state. Call once per frame during
+    // gameplay (main.js). Only handles tick=true (cyclic) clocks for real - the timer's
+    // "current cycle number" is derived straight from the system clock (Date.now()), the
+    // same trick used for OnTickUpdate: every player's device already agrees on what time it
+    // is, so everyone computes the exact same remaining-time/finished-moment with zero
+    // network messages needed, whether they've been playing for an hour or just joined.
+    // A non-repeating (tick=false) clock instead just counts down once from whenever this
+    // particular client reached this code (no cross-client sync attempt - there's no shared
+    // "map start" instant to anchor a one-shot countdown to).
+    updateClocks() {
+        if (!this.scriptRules || this.scriptRules.length === 0) return;
+        const createRules = this.scriptRules.filter(r => r.event === 'create_clock');
+        const now = Date.now() / 1000;
+
+        createRules.forEach(rule => {
+            let clock = this.clocks[rule.name];
+            if (!clock) {
+                clock = this.clocks[rule.name] = {
+                    duration: rule.duration, tick: rule.tick, shwscr: rule.shwscr,
+                    lastCycleIndex: -1, remaining: rule.duration, justFinished: false, npcs: []
+                };
+            }
+
+            if (clock.tick) {
+                const cycleIndex = Math.floor(now / clock.duration);
+                if (clock.lastCycleIndex === -1) {
+                    // First time we've ever evaluated this clock (e.g. just joined/loaded) -
+                    // adopt the current cycle without treating it as "just finished".
+                    clock.lastCycleIndex = cycleIndex;
+                }
+                clock.justFinished = cycleIndex !== clock.lastCycleIndex;
+                clock.lastCycleIndex = cycleIndex;
+                const elapsedInCycle = now % clock.duration;
+                clock.remaining = clock.duration - elapsedInCycle;
+            } else {
+                // One-shot: count down from when we first saw it, then stop at 0.
+                if (clock.startedAt === undefined) clock.startedAt = now;
+                const elapsed = now - clock.startedAt;
+                const prevRemaining = clock.remaining;
+                clock.remaining = Math.max(0, clock.duration - elapsed);
+                clock.justFinished = prevRemaining > 0 && clock.remaining <= 0;
+            }
+        });
     }
 
     // Fully removes a part spawned via createBlock/createPart from the world: takes it out
