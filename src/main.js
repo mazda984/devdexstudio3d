@@ -2169,6 +2169,10 @@ document.getElementById('tool-toolbox')?.addEventListener('click', () => {
                     <button id="tb-stairs" class="menu-btn" style="flex:1 1 140px;">Stairs</button>
                     <button id="tb-ebike" class="menu-btn" style="flex:1 1 140px;">Electric Bike</button>
                 </div>
+                <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin-top:4px;">
+                    <input type="checkbox" id="tb-car-explode" checked>
+                    💥 Cars break apart when they crash
+                </label>
                 <div style="display:flex; gap:8px; margin-top:6px;">
                     <button id="tb-diesound" class="menu-btn" style="flex:1; background:#ffdddd;">Attach Lego DieSound</button>
                     <button id="tb-leaderboard" class="menu-btn" style="flex:1; background:#ddffdd;">Leaderboard Script</button>
@@ -2267,20 +2271,22 @@ document.getElementById('tool-toolbox')?.addEventListener('click', () => {
         document.getElementById('tb-redcar').addEventListener('click', () => {
             playSwitch();
             const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -10).applyQuaternion(camera.quaternion));
-            const car = new Vehicle(scene, pos.x, Math.max(5, pos.y), pos.z, 0xff3333);
+            const explodeOnCrash = document.getElementById('tb-car-explode')?.checked !== false;
+            const car = new Vehicle(scene, pos.x, Math.max(5, pos.y), pos.z, 0xff3333, explodeOnCrash);
             world.vehicles.push(car);
             updateExplorer();
-            addChatMessage('System', 'Red car spawned.');
+            addChatMessage('System', 'Red car spawned. Click its seat to drive, jump to get out.');
         });
 
         // Blue Car prefab
         document.getElementById('tb-bluecar').addEventListener('click', () => {
             playSwitch();
             const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -10).applyQuaternion(camera.quaternion));
-            const car = new Vehicle(scene, pos.x, Math.max(5, pos.y), pos.z, 0x3366ff);
+            const explodeOnCrash = document.getElementById('tb-car-explode')?.checked !== false;
+            const car = new Vehicle(scene, pos.x, Math.max(5, pos.y), pos.z, 0x3366ff, explodeOnCrash);
             world.vehicles.push(car);
             updateExplorer();
-            addChatMessage('System', 'Blue car spawned.');
+            addChatMessage('System', 'Blue car spawned. Click its seat to drive, jump to get out.');
         });
 
         // Simple Stairs generator
@@ -3321,12 +3327,50 @@ window.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if ((gameState !== 'PLAYING' && gameState !== 'TEST')) return;
     if (!document.pointerLockElement) return;
+
+    // Vehicle seat: clicking a car (looking straight at it, crosshair-center raycast since
+    // we're pointer-locked) gets in as the driver; clicking the car you're already driving
+    // gets back out. Takes priority over whatever's equipped so cars are always usable.
+    if (tryUseVehicleSeat()) return;
+
     if (!equippedWeapon) return;
     if (equippedWeapon === 'nokia') openFlappyBirdWebview();
     else if (equippedWeapon === 'sword') swingSword();
     else if (equippedWeapon === 'buildtool') placeBuildBlock();
     else fireRocket();
 });
+
+// Raycasts from the camera center against every intact vehicle. Returns true (and
+// mounts/dismounts the player) if the crosshair was on a vehicle within reach, so the
+// caller can skip firing whatever's equipped that click.
+const vehicleSeatRaycaster = new THREE.Raycaster();
+function tryUseVehicleSeat() {
+    if (!world || !world.vehicles || world.vehicles.length === 0) return false;
+    const liveVehicles = world.vehicles.filter(v => !v.destroyed);
+    if (liveVehicles.length === 0) return false;
+
+    vehicleSeatRaycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const hits = vehicleSeatRaycaster.intersectObjects(liveVehicles.map(v => v.mesh), true);
+    if (hits.length === 0 || hits[0].distance > 10) return false;
+
+    let obj = hits[0].object;
+    while (obj && !(obj.userData && obj.userData.type === 'vehicle')) obj = obj.parent;
+    const vehicle = obj && obj.userData && obj.userData.parent;
+    if (!vehicle) return false;
+
+    if (player.vehicle === vehicle) {
+        // Already driving this one - clicking it again gets out (same as pressing jump).
+        vehicle.driver = null;
+        player.vehicle = null;
+        player.velocity.set(0, 12, 0);
+        player.position.y += 2;
+    } else if (!vehicle.driver) {
+        player.vehicle = vehicle;
+        vehicle.driver = player;
+        player.velocity.set(0, 0, 0);
+    }
+    return true;
+}
 
 
 

@@ -1020,6 +1020,23 @@ export class World {
             data.push({ type: 'meta_camera', mode: this.cameraMode });
         }
 
+        // Vehicles (toolbox cars) - previously not saved at all, so any car placed via the
+        // Toolbox vanished the moment the map was saved/reloaded/published. Persist the ones
+        // still intact (a mid-explosion wreck isn't worth restoring) along with their color
+        // and crash-explosion preference.
+        this.vehicles.forEach(v => {
+            if (v.destroyed) return;
+            data.push({
+                type: 'vehicle',
+                x: v.mesh.position.x,
+                y: v.mesh.position.y,
+                z: v.mesh.position.z,
+                ry: v.mesh.rotation.y,
+                color: v.color,
+                explodeOnCrash: v.explodeOnCrash
+            });
+        });
+
         this.items.forEach(obj => {
             if (obj.userData && obj.userData.serial) {
                 const s = obj.userData.serial;
@@ -1108,6 +1125,11 @@ export class World {
                     if (d.name) mesh.name = d.name;
                     this._applyAnchorState(mesh, d);
                     if (d.props && d.props.light) this.applyPartLight(mesh, d.props.light);
+                    placedCount++;
+                } else if (d.type === 'vehicle') {
+                    const car = new Vehicle(this.scene, d.x, d.y, d.z, d.color !== undefined ? d.color : 0xff0000, d.explodeOnCrash !== false);
+                    car.mesh.rotation.y = d.ry || 0;
+                    this.vehicles.push(car);
                     placedCount++;
                 } else if (d.type === 'bird') {
                     const mesh = this.createBird(d.x, d.y, d.z);
@@ -1864,5 +1886,9 @@ export class World {
     update(dt) {
         this.animated.forEach(anim => anim.update(dt, anim));
         this.vehicles.forEach(v => v.update(dt, this.collidables));
+        // Sweep out wrecks whose debris has finished fading (see Vehicle.updateDebris).
+        if (this.vehicles.some(v => v.dead)) {
+            this.vehicles = this.vehicles.filter(v => !v.dead);
+        }
     }
 }
