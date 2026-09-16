@@ -29,6 +29,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import nipplejs from 'nipplejs';
 import JSZip from 'jszip';
 import { World, buildPartMaterials } from './World.js';
+import { Vehicle } from './Vehicle.js';
 import { Player, createPlayerMesh } from './Player.js';
 import { RemotePlayer } from './RemotePlayer.js';
 import { InputManager } from './InputManager.js';
