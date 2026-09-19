@@ -662,6 +662,37 @@
                     this._conns = new Map(); // peerId -> PeerJS DataConnection
                     this.isHost = false;
                     this._hostConn = null;
+                    // Clock sync: OnTickUpdate scripts (rising lava, blinking colors, clocks)
+                    // work out "what phase of the cycle are we in right now" from a shared
+                    // clock so everyone lands on the same value without network chatter every
+                    // frame - but that only works if every device's clock agrees, and real
+                    // system clocks routinely drift by seconds or minutes. So instead of using
+                    // each device's raw Date.now(), every client measures the difference
+                    // between its own clock and the host's clock (like NTP) and getSyncedTime()
+                    // below returns Date.now() adjusted by that offset - the host is always the
+                    // time authority (offset 0), and everyone else's "world time" matches it.
+                    this._clockOffset = 0;
+                }
+
+                // Time every OnTickUpdate/clock script should use instead of raw Date.now() -
+                // see the _clockOffset comment above. Falls back to plain Date.now() before
+                // the first sync round-trip completes (a few hundred ms after connecting).
+                getSyncedTime() {
+                    return Date.now() + this._clockOffset;
+                }
+
+                // Client-side: ping the host to measure clock offset, NTP-style. Called once
+                // right after connecting, then periodically to correct for drift over a long
+                // session.
+                _startClockSync() {
+                    if (this.isHost) return; // host IS the clock authority, nothing to sync
+                    const ping = () => {
+                        if (!this._hostConn || !this._hostConn.open) return;
+                        try { this._hostConn.send({ kind: 'time-ping', t0: Date.now() }); } catch (e) {}
+                    };
+                    ping();
+                    if (this._clockSyncInterval) clearInterval(this._clockSyncInterval);
+                    this._clockSyncInterval = setInterval(ping, 4000);
                 }
 
                 _roomId() {
@@ -727,7 +758,7 @@
                                 const conn = peer.connect(hostId, { reliable: true });
                                 this._hostConn = conn;
                                 this._wireConn(conn, hostId);
-                                conn.on('open', () => { clearTimeout(giveUpTimer); finish(); });
+                                conn.on('open', () => { clearTimeout(giveUpTimer); this._startClockSync(); finish(); });
                                 conn.on('error', () => { clearTimeout(giveUpTimer); this._handleHostLost(); finish(); });
                                 conn.on('close', () => { this._handleHostLost(); });
                             });
@@ -800,6 +831,20 @@
                                 try { this.onmessage({ data: packet.data, clientId: packet.id }); } catch (e) {}
                             }
                             if (this.isHost) this._relay(packet, peerId);
+                        } else if (packet.kind === 'time-ping') {
+                            // Only the host answers - it's the time authority. Echo the
+                            // client's own t0 back alongside the host's current time so the
+                            // client can do a proper NTP-style round-trip calculation.
+                            if (this.isHost) {
+                                try { conn.send({ kind: 'time-pong', t0: packet.t0, hostTime: Date.now() }); } catch (e) {}
+                            }
+                        } else if (packet.kind === 'time-pong') {
+                            // NTP-style offset: assume the network delay was symmetric, so the
+                            // host's clock was "hostTime" roughly halfway through our round trip.
+                            const t3 = Date.now();
+                            const roundTrip = t3 - packet.t0;
+                            const estimatedHostNowAtT3 = packet.hostTime + roundTrip / 2;
+                            this._clockOffset = estimatedHostNowAtT3 - t3;
                         }
                     });
                     conn.on('error', () => {});

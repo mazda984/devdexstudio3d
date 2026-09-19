@@ -456,6 +456,24 @@ export class World {
         return World.COLOR_NAMES[s.toLowerCase()] ?? 0xffffff;
     }
 
+    // Shared "world clock" used by every tick-based script system below (rising lava,
+    // blinking colors, create:clock countdowns). Prefers the multiplayer room's clock-synced
+    // time (room.getSyncedTime(), set up in index.html's WebsimSocket - every client measures
+    // its offset from the host's clock, NTP-style) over each device's raw Date.now(), because
+    // two computers' system clocks routinely disagree by seconds or minutes, which used to
+    // show up as one player's rising lava being noticeably ahead of another's despite both
+    // running the exact same "same real-world instant -> same height" formula. Falls back to
+    // plain Date.now() when there's no room (e.g. no networking loaded, single-player) or
+    // before the first sync round-trip has completed.
+    static syncedNow() {
+        try {
+            if (typeof window !== 'undefined' && window.__nbloxRoom && typeof window.__nbloxRoom.getSyncedTime === 'function') {
+                return window.__nbloxRoom.getSyncedTime();
+            }
+        } catch (e) {}
+        return Date.now();
+    }
+
     // Runs every OnTickUpdate:command? rule on a fixed timer (currently every 1.4s,
     // independent of framerate). Call this once per frame during gameplay.
     //
@@ -469,7 +487,7 @@ export class World {
     updateScriptTicks(dt) {
         if (!this.scriptRules || this.scriptRules.length === 0) return;
         const TICK_INTERVAL = 1.4;
-        const tickCount = Math.floor(Date.now() / (TICK_INTERVAL * 1000));
+        const tickCount = Math.floor(World.syncedNow() / (TICK_INTERVAL * 1000));
         this.scriptRules.forEach((rule) => {
             if (rule.event !== 'tick') return;
             this.runTickScriptCommand(rule, tickCount);
@@ -581,7 +599,7 @@ export class World {
     updateClocks() {
         if (!this.scriptRules || this.scriptRules.length === 0) return;
         const createRules = this.scriptRules.filter(r => r.event === 'create_clock');
-        const now = Date.now() / 1000;
+        const now = World.syncedNow() / 1000;
 
         createRules.forEach(rule => {
             let clock = this.clocks[rule.name];

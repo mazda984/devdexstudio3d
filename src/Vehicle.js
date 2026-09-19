@@ -83,7 +83,9 @@ export class Vehicle {
 
         // Forward Collision (crash detection) - cast a ray from the front bumper in the
         // direction of travel; if something solid is close and we're moving fast, crash.
-        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+        // Local +Z is "front" here (that's the side the windshield/glass sits on - see
+        // constructor), so pressing W drives toward local +Z, matching the windshield.
+        const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(this.mesh.quaternion);
         const travelDir = fwd.clone().multiplyScalar(Math.sign(this.velocity) || 1);
         if (Math.abs(this.velocity) > 12 && collidables && collidables.length) {
             const bumperOffset = 4 * Math.sign(this.velocity || 1);

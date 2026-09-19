@@ -36,6 +36,11 @@ import { InputManager } from './InputManager.js';
 import { boxUnwrapUVs, surfaceManager, createFaceTexture, createTorsoTexture } from './utils.js';
 
 const room = new WebsimSocket();
+// World.js needs this to sync OnTickUpdate scripts (rising lava, etc.) against the room's
+// clock-synced time instead of each device's own possibly-drifted system clock - see
+// World.syncedNow(). Exposed on window since World.js is a separate module without a direct
+// reference to `room`.
+window.__nbloxRoom = room;
 
 // --- Remote sharing storage -------------------------------------------------
 // This game itself is just static files (no server of its own), so to let a
@@ -420,6 +425,29 @@ function applyDynSync(objects) {
     });
 }
 
+// Non-host clients call this when a 'rig_sync' message arrives: stash the host's reported
+// RigBot state (matched by userData.id, since RigBots can be added/removed independently of
+// the ball-style dynamicObjects array) so the interpolation step in updatePlaying() can ease
+// toward it instead of every client simulating its own diverging chase target.
+function applyRigSync(rigs) {
+    if (!world || !world.items || !Array.isArray(rigs)) return;
+    const byId = {};
+    world.items.forEach(o => { if (o.userData && o.userData.isRig) byId[o.userData.id] = o; });
+    rigs.forEach(r => {
+        const rig = byId[r.id];
+        if (!rig) return;
+        rig.userData.netTarget = { x: r.x, y: r.y, z: r.z };
+        rig.userData.netVY = r.vy || 0;
+        rig.userData.netRy = r.ry;
+    });
+}
+
+// Throttling state for the RigBot sync broadcast, mirroring dynSync above.
+const rigSync = {
+    lastSendTime: 0,
+    sendInterval: 0.05
+};
+
 // Load pet GLB and attach a cloned pet to the player's head when ready
 (function loadAndAttachPet() {
     const loader = new GLTFLoader();
@@ -605,6 +633,16 @@ room.onmessage = (evt) => {
         // authority.
         if (evt.clientId !== room.clientId && !isPhysicsHost()) {
             applyDynSync(data.objects);
+        }
+        return;
+    }
+    if (data.type === 'rig_sync') {
+        // Same host-authoritative pattern as dyn_sync, but for RigBot chase/gravity - see
+        // applyRigSync() and the RigBot AI block in updatePlaying() for why this exists
+        // (every client used to run its own chase target locally, so the same RigBot visibly
+        // chased a different player - or nobody at all - on each screen).
+        if (evt.clientId !== room.clientId && !isPhysicsHost()) {
+            applyRigSync(data.rigs);
         }
         return;
     }
@@ -7152,68 +7190,134 @@ function updatePlaying(dt) {
     updateClockScripts();
 
     // RigBot Physics/AI: every RigBot falls with gravity like the player; ones with
-    // "Attacks Player" enabled also walk toward the player (or a nearer built block - see
-    // the Build tool - if one's in the way, giving built structures an actual defensive
+    // "Attacks Player" enabled also walk toward the nearest player (or a nearer built block -
+    // see the Build tool - if one's in the way, giving built structures an actual defensive
     // purpose) while grounded, and deal real melee damage once in range.
+    //
+    // IMPORTANT: this used to run 100% locally on every client, each one chasing only its OWN
+    // local `player` - so the exact same RigBot visibly walked toward a completely different
+    // point (whichever player that particular screen belonged to) on every screen at once.
+    // Fixed the same way as the dyn_sync ball physics above: exactly one client (the elected
+    // "physics host") runs the AI/gravity simulation using every known player (local + all
+    // remote) as candidate targets, and broadcasts the result; everyone else just eases their
+    // local copy toward whatever the host last reported instead of simulating their own.
     if (world.items && world.items.length > 0) {
         const RIG_GRAVITY = -100;
         const RIG_SPEED = 3.2; // units/sec, deliberately slower than the player can walk
         const rigRaycaster = new THREE.Raycaster();
         const downVec = new THREE.Vector3(0, -1, 0);
+        const allRigs = world.items.filter(r => r.userData && r.userData.isRig);
 
-        world.items.forEach(rig => {
-            if (!rig.userData || !rig.userData.isRig) return;
-            if (rig.userData.velocityY === undefined) rig.userData.velocityY = 0;
-            if (rig.userData.meleeCooldown === undefined) rig.userData.meleeCooldown = 0;
-            rig.userData.meleeCooldown -= dt;
+        if (isPhysicsHost()) {
+            // Every currently-alive player on this map is a valid chase target, not just our
+            // own local one - a RigBot should go after whoever is actually closest.
+            const targets = [];
+            if (!player.isDead) targets.push({ pos: player.mesh.position, remoteId: null });
+            Object.entries(remotePlayers).forEach(([id, rp]) => {
+                if (rp && rp.mesh && !rp.isDead) targets.push({ pos: rp.mesh.position, remoteId: id });
+            });
 
-            // Chase the player (horizontal only) if this RigBot is set to attack - or, if a
-            // built block is closer than the player and within "notice" range, attack that
-            // instead (so structures actually block/absorb attackers rather than being
-            // walked straight through).
-            if (rig.userData.attacksPlayer && !player.isDead) {
-                let nearestBlock = null, nearestBlockDist = Infinity;
-                (world.builtBlocks || []).forEach(b => {
-                    const d = rig.position.distanceTo(b.position);
-                    if (d < nearestBlockDist) { nearestBlockDist = d; nearestBlock = b; }
-                });
-                const distToPlayer = rig.position.distanceTo(player.mesh.position);
-                const targetIsBlock = nearestBlock && nearestBlockDist < distToPlayer && nearestBlockDist < 20;
-                const targetPos = targetIsBlock ? nearestBlock.position : player.mesh.position;
-                const meleeRange = targetIsBlock ? 4.5 : 2.6;
+            allRigs.forEach(rig => {
+                if (rig.userData.velocityY === undefined) rig.userData.velocityY = 0;
+                if (rig.userData.meleeCooldown === undefined) rig.userData.meleeCooldown = 0;
+                rig.userData.meleeCooldown -= dt;
 
-                const toTarget = new THREE.Vector3().subVectors(targetPos, rig.position);
-                const flatDist = Math.hypot(toTarget.x, toTarget.z);
-                toTarget.y = 0;
+                if (rig.userData.attacksPlayer && targets.length > 0) {
+                    let nearestBlock = null, nearestBlockDist = Infinity;
+                    (world.builtBlocks || []).forEach(b => {
+                        const d = rig.position.distanceTo(b.position);
+                        if (d < nearestBlockDist) { nearestBlockDist = d; nearestBlock = b; }
+                    });
+                    let nearestTarget = null, nearestTargetDist = Infinity;
+                    targets.forEach(t => {
+                        const d = rig.position.distanceTo(t.pos);
+                        if (d < nearestTargetDist) { nearestTargetDist = d; nearestTarget = t; }
+                    });
+                    const targetIsBlock = nearestBlock && nearestBlockDist < nearestTargetDist && nearestBlockDist < 20;
+                    const targetPos = targetIsBlock ? nearestBlock.position : nearestTarget.pos;
+                    const meleeRange = targetIsBlock ? 4.5 : 2.6;
 
-                if (flatDist > meleeRange) {
-                    toTarget.normalize();
-                    rig.position.addScaledVector(toTarget, RIG_SPEED * dt);
-                    rig.rotation.y = Math.atan2(toTarget.x, toTarget.z);
-                } else if (rig.userData.meleeCooldown <= 0) {
-                    rig.userData.meleeCooldown = 1.0; // 1 hit/sec
-                    if (targetIsBlock) {
-                        const dmg = 12;
-                        damageBuiltBlock(nearestBlock.userData.buildId, dmg);
-                        try { room.send({ type: 'build_damage', id: nearestBlock.userData.buildId, amount: dmg }); } catch (e) {}
-                    } else {
-                        player.takeDamage(8);
+                    const toTarget = new THREE.Vector3().subVectors(targetPos, rig.position);
+                    const flatDist = Math.hypot(toTarget.x, toTarget.z);
+                    toTarget.y = 0;
+
+                    if (flatDist > meleeRange) {
+                        toTarget.normalize();
+                        rig.position.addScaledVector(toTarget, RIG_SPEED * dt);
+                        rig.rotation.y = Math.atan2(toTarget.x, toTarget.z);
+                    } else if (rig.userData.meleeCooldown <= 0) {
+                        rig.userData.meleeCooldown = 1.0; // 1 hit/sec
+                        if (targetIsBlock) {
+                            const dmg = 12;
+                            damageBuiltBlock(nearestBlock.userData.buildId, dmg);
+                            try { room.send({ type: 'build_damage', id: nearestBlock.userData.buildId, amount: dmg }); } catch (e) {}
+                        } else if (nearestTarget.remoteId === null) {
+                            // Nearest target is the host's own local player.
+                            player.takeDamage(8);
+                        } else {
+                            // Nearest target is some other, remote player - the host can't call
+                            // their takeDamage() directly (different browser), so tell their
+                            // client to apply it, same message type used for rocket hits.
+                            try { room.send({ type: 'weapon_hit', targetId: nearestTarget.remoteId, damage: 8 }); } catch (e) {}
+                        }
                     }
                 }
-            }
 
-            // Fall with gravity, same as the player, using a downward raycast against
-            // the world's collidables to find the ground.
-            rig.userData.velocityY += RIG_GRAVITY * dt;
-            rig.position.y += rig.userData.velocityY * dt;
+                // Fall with gravity, same as the player, using a downward raycast against
+                // the world's collidables to find the ground.
+                rig.userData.velocityY += RIG_GRAVITY * dt;
+                rig.position.y += rig.userData.velocityY * dt;
 
-            rigRaycaster.set(new THREE.Vector3(rig.position.x, rig.position.y + 3, rig.position.z), downVec);
-            const hits = rigRaycaster.intersectObjects(world.collidables, true);
-            if (hits.length > 0 && hits[0].distance <= 3.3) {
-                rig.position.y = hits[0].point.y;
-                rig.userData.velocityY = 0;
+                rigRaycaster.set(new THREE.Vector3(rig.position.x, rig.position.y + 3, rig.position.z), downVec);
+                const hits = rigRaycaster.intersectObjects(world.collidables, true);
+                if (hits.length > 0 && hits[0].distance <= 3.3) {
+                    rig.position.y = hits[0].point.y;
+                    rig.userData.velocityY = 0;
+                }
+            });
+
+            // Broadcast the authoritative state to everyone else on this map, throttled so we
+            // don't spam the socket every single frame (same cadence as dyn_sync above).
+            rigSync.lastSendTime += dt;
+            if (rigSync.lastSendTime >= rigSync.sendInterval && allRigs.length > 0) {
+                rigSync.lastSendTime = 0;
+                try {
+                    room.send({
+                        type: 'rig_sync',
+                        rigs: allRigs.map(rig => ({
+                            id: rig.userData.id,
+                            x: rig.position.x, y: rig.position.y, z: rig.position.z,
+                            ry: rig.rotation.y,
+                            vy: rig.userData.velocityY || 0
+                        }))
+                    });
+                } catch (e) {
+                    // Non-fatal - worst case remote players see a slightly stale RigBot until
+                    // the next successful broadcast.
+                }
             }
-        });
+        } else {
+            // Not the host: don't simulate the chase/gravity at all (that's exactly what
+            // caused every screen to show a different position) - just glide toward wherever
+            // the host last said this RigBot was, dead-reckoning forward with its last known
+            // vertical velocity between the ~20Hz packets so falling still looks smooth.
+            allRigs.forEach(rig => {
+                const target = rig.userData.netTarget;
+                if (!target) return; // haven't heard from the host yet
+                target.y += (rig.userData.netVY || 0) * dt;
+
+                const LERP = Math.min(1, dt * 12);
+                rig.position.x += (target.x - rig.position.x) * LERP;
+                rig.position.y += (target.y - rig.position.y) * LERP;
+                rig.position.z += (target.z - rig.position.z) * LERP;
+
+                if (rig.userData.netRy !== undefined) {
+                    let diff = rig.userData.netRy - rig.rotation.y;
+                    diff = Math.atan2(Math.sin(diff), Math.cos(diff)); // shortest turn
+                    rig.rotation.y += diff * LERP;
+                }
+            });
+        }
     }
 
     // 1. Update Camera Rotation
@@ -7233,6 +7337,20 @@ function updatePlaying(dt) {
              playSwitch(1.5, 0.3);
              lastCamYawClick = cameraYaw;
         }
+    }
+
+    // While driving, pull the chase camera around to match the car's heading. Steering
+    // (A/D) only rotates the vehicle itself - without this the camera stays wherever the
+    // mouse last pointed, so turning the car looks like the player spinning in place under
+    // a fixed camera instead of the player actually facing/looking the way the car goes.
+    // Player.mesh.rotation.y is already kept equal to the vehicle's rotation every frame
+    // (see Player.update's vehicle branch), and that value is what's sent to other clients,
+    // so this only affects the local camera - everyone already sees the correct facing.
+    if (player.vehicle && !player.vehicle.destroyed) {
+        const targetYaw = player.vehicle.mesh.rotation.y;
+        let diff = targetYaw - cameraYaw;
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff)); // shortest turn, wrapped to [-PI, PI]
+        cameraYaw += diff * Math.min(1, dt * 6);
     }
 
     // 2. Update Camera Position
