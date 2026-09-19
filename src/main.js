@@ -3513,7 +3513,7 @@ document.body.appendChild(flappyBirdOverlay);
 const flappyIframe = flappyBirdOverlay.querySelector('#flappy-iframe');
 
 function openFlappyBirdWebview() {
-    flappyIframe.src = 'https://flappybird.io/';
+    flappyIframe.src = 'https://mazda984.github.io/devos/';
     flappyBirdOverlay.style.display = 'flex';
     if (document.pointerLockElement) document.exitPointerLock();
 }
