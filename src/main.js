@@ -646,6 +646,30 @@ room.onmessage = (evt) => {
         }
         return;
     }
+    if (data.type === 'key_collected') {
+        // Someone else picked up this key - hide it here too so it can't be "collected"
+        // twice, but don't touch our own heldKeys (that's per-player, see updateKeyPickups).
+        if (evt.clientId !== room.clientId) {
+            const o = world.items.find(x => x.userData && x.userData.isKeyPickup && x.userData.pickupId === data.pickupId);
+            if (o && !o.userData.collected) { o.userData.collected = true; o.visible = false; }
+        }
+        return;
+    }
+    if (data.type === 'door_open') {
+        // Whoever triggered it already applied this locally - everyone else just mirrors the
+        // same open/re-lock timer so the door looks the same (passable) for every player, key
+        // holder or not, exactly like a door someone physically propped open.
+        if (evt.clientId !== room.clientId) {
+            const o = world.items.find(x => x.userData && x.userData.isDoor && x.userData.doorId === data.doorId);
+            if (o && !o.userData.doorOpenUntil) {
+                const now = room.getSyncedTime ? room.getSyncedTime() : Date.now();
+                o.userData._collideBeforeOpen = o.userData.collide !== false;
+                o.userData.doorOpenUntil = now + (data.duration || 3) * 1000;
+                setPartCollide(o, false);
+            }
+        }
+        return;
+    }
     if (data.type === 'chat') {
         const id = evt.clientId;
         const msg = data.message || '';
@@ -1517,6 +1541,9 @@ const propInputs = {
     attachRig: document.getElementById('prop-attach-rig'),
     material: document.getElementById('prop-material'),
     weaponType: document.getElementById('prop-weapon-type'),
+    keyId: document.getElementById('prop-key-id'),
+    doorKeyId: document.getElementById('prop-door-key-id'),
+    doorDelay: document.getElementById('prop-door-delay'),
     textContent: document.getElementById('prop-text-content'),
     textColor: document.getElementById('prop-text-color'),
     lightEnabled: document.getElementById('prop-light-enabled'),
@@ -1553,7 +1580,7 @@ function updateStudioPropertiesUI() {
     if (propInputs.name) propInputs.name.value = m.name || '';
 
     const rigSection = document.getElementById('prop-section-rig');
-    if (m.userData && (m.userData.isRig || m.userData.isModel3D || m.userData.isWeaponPickup)) {
+    if (m.userData && (m.userData.isRig || m.userData.isModel3D || m.userData.isWeaponPickup || m.userData.isKeyPickup)) {
         if (m.userData.isRig) {
             if (rigSection) rigSection.style.display = '';
             if (propInputs.rigAttack) propInputs.rigAttack.checked = !!m.userData.attacksPlayer;
@@ -1581,7 +1608,14 @@ function updateStudioPropertiesUI() {
             if (wSection) wSection.style.display = '';
             if (propInputs.weaponType) propInputs.weaponType.value = m.userData.weaponType || 'rocketlauncher';
         }
-        if (m.userData.isRig || m.userData.isWeaponPickup) return; // no anchor/weld UI needed for these
+        const keySection = document.getElementById('prop-section-key');
+        if (m.userData.isKeyPickup) {
+            if (keySection) keySection.style.display = '';
+            if (propInputs.keyId) propInputs.keyId.value = m.userData.keyId || '';
+        } else if (keySection) {
+            keySection.style.display = 'none';
+        }
+        if (m.userData.isRig || m.userData.isWeaponPickup || m.userData.isKeyPickup) return; // no anchor/weld UI needed for these
 
         // Imported 3D models CAN be anchored and welded to a RigBot, same as normal parts.
         if (propInputs.anchored) propInputs.anchored.checked = m.userData?.anchored !== false;
@@ -1601,6 +1635,21 @@ function updateStudioPropertiesUI() {
         rigSection.style.display = 'none';
         const wSection = document.getElementById('prop-section-weapon');
         if (wSection) wSection.style.display = 'none';
+        const keySection = document.getElementById('prop-section-key');
+        if (keySection) keySection.style.display = 'none';
+    }
+
+    // Door: a normal wooden block underneath, so everything below (Color/Material/Size/
+    // Anchored/CanCollide) still applies to it too - this section just adds the key-lock
+    // fields on top.
+    const doorSection = document.getElementById('prop-section-door');
+    const isDoor = !!(m.userData && m.userData.isDoor);
+    if (doorSection) {
+        doorSection.style.display = isDoor ? '' : 'none';
+        if (isDoor) {
+            if (propInputs.doorKeyId) propInputs.doorKeyId.value = m.userData.opensWithKeyId || '';
+            if (propInputs.doorDelay) propInputs.doorDelay.value = (m.userData.reopenDelay !== undefined) ? m.userData.reopenDelay : 3;
+        }
     }
     
     // SAFETY: ensure material exists before reading properties
@@ -1758,6 +1807,15 @@ const onPropChange = () => {
         THREE.MathUtils.degToRad(parseFloat(propInputs.rz.value))
     );
 
+    if (m.userData && m.userData.isKeyPickup) {
+        // Just a plain Group - position/rotation (already applied above) plus the Key ID
+        // text field is all that applies.
+        if (propInputs.keyId) {
+            m.userData.keyId = propInputs.keyId.value.trim();
+            m.userData.serial.props.keyId = m.userData.keyId;
+        }
+        return;
+    }
     if (m.userData && m.userData.isWeaponPickup) {
         // Just a plain Group - position/rotation (already applied above) is all that applies,
         // EXCEPT for the weapon Type dropdown: switching it rebuilds the pickup as a
@@ -1876,6 +1934,26 @@ const onPropChange = () => {
         if (Array.isArray(m.material)) m.material.forEach(mat => mat.color = col);
         else m.material.color = col;
         if (m.userData.serial) m.userData.serial.color = col.getHex();
+    }
+
+    // Door: key-lock fields. Doesn't touch CanCollide directly here - that's flipped
+    // temporarily at runtime while it's open (see updateDoors()) and just restored to
+    // whatever the checkbox says once it re-locks.
+    if (m.userData && m.userData.isDoor) {
+        if (propInputs.doorKeyId) {
+            m.userData.opensWithKeyId = propInputs.doorKeyId.value.trim();
+        }
+        if (propInputs.doorDelay) {
+            const val = parseFloat(propInputs.doorDelay.value);
+            m.userData.reopenDelay = (!isNaN(val) && val >= 0) ? val : 3;
+        }
+        if (m.userData.serial) {
+            m.userData.serial.props = Object.assign({}, m.userData.serial.props, {
+                doorId: m.userData.doorId,
+                opensWithKeyId: m.userData.opensWithKeyId,
+                reopenDelay: m.userData.reopenDelay
+            });
+        }
     }
 
     // Anchored: this actually drives physics now (see world.dynamicObjects handling in
@@ -2731,6 +2809,26 @@ document.getElementById('tool-weapon').onclick = () => {
     updateExplorer();
 };
 
+document.getElementById('tool-key').onclick = () => {
+    playSwitch();
+    const pos = camera.position.clone().add(new THREE.Vector3(0, -1, -5).applyQuaternion(camera.quaternion));
+    const key = world.createKeyPickup(pos.x, pos.y, pos.z, 'key-' + (world.items.filter(o => o.userData && o.userData.isKeyPickup).length + 1));
+    studioSelected = key;
+    updateStudioSelection();
+    updateExplorer();
+    addChatMessage('System', '🔑 Key placed. Set its Key ID in Properties, then give a Door the same ID.');
+};
+
+document.getElementById('tool-door').onclick = () => {
+    playSwitch();
+    const pos = camera.position.clone().add(new THREE.Vector3(0, 2.4, -5).applyQuaternion(camera.quaternion));
+    const door = world.createDoor(pos.x, pos.y, pos.z);
+    studioSelected = door;
+    updateStudioSelection();
+    updateExplorer();
+    addChatMessage('System', '🚪 Door placed. Set "Opens With Key ID" in Properties to match a Key.');
+};
+
 document.getElementById('tool-textblock').onclick = () => {
     playSwitch();
     const pos = camera.position.clone().add(new THREE.Vector3(0, 0, -6).applyQuaternion(camera.quaternion));
@@ -3302,6 +3400,79 @@ function updateWeaponSystem(dt) {
     updateRockets(dt);
 }
 const weaponSystemState = { eWasDown: false };
+
+// --- Keys & Doors ------------------------------------------------------------------------
+// Local player's collected key IDs. A plain Set of strings (the "Key ID" set in Properties),
+// not synced directly - each player keeps their own inventory, exactly like the weapon slot.
+const heldKeys = new Set();
+
+// Called every frame from updatePlaying(): walking into an uncollected Key picks it up -
+// added to heldKeys locally, and hidden for EVERYONE (a 'key_collected' broadcast), since a
+// key is a one-time pickup, not a reusable rack like the weapon spawns.
+function updateKeyPickups(dt) {
+    world.items.forEach(o => {
+        if (!o.userData || !o.userData.isKeyPickup || o.userData.collected) return;
+        const d = o.position.distanceTo(player.mesh.position);
+        if (d < 1.6) {
+            o.userData.collected = true;
+            o.visible = false;
+            if (o.userData.keyId) heldKeys.add(o.userData.keyId);
+            addChatMessage('System', '🔑 Picked up a key!');
+            try { room.send({ type: 'key_collected', pickupId: o.userData.pickupId }); } catch (e) {}
+        }
+    });
+}
+
+// Called every frame from updatePlaying(): re-locks any Door whose open timer expired, and
+// checks unlocked Doors for a player standing close enough who's holding the matching key.
+// Any client that triggers a door tells everyone else via 'door_open' (see room.onmessage
+// below) - once open, it's open for anyone to walk through, not just the key holder, exactly
+// like a real door someone else propped open.
+function updateDoors(dt) {
+    const now = room.getSyncedTime ? room.getSyncedTime() : Date.now();
+    world.items.forEach(o => {
+        if (!o.userData || !o.userData.isDoor) return;
+
+        if (o.userData.doorOpenUntil) {
+            if (now >= o.userData.doorOpenUntil) {
+                o.userData.doorOpenUntil = 0;
+                setPartCollide(o, o.userData._collideBeforeOpen !== false);
+            }
+            return; // already open (or just re-closed above) - nothing else to check this frame
+        }
+
+        if (!o.userData.opensWithKeyId || !heldKeys.has(o.userData.opensWithKeyId)) return;
+
+        const halfSpan = Math.max(o.userData.serial?.w || 1, o.userData.serial?.d || 1) / 2 + 1.4;
+        const d = o.position.distanceTo(player.mesh.position);
+        if (d > halfSpan) return;
+
+        const delay = o.userData.reopenDelay !== undefined ? o.userData.reopenDelay : 3;
+        o.userData._collideBeforeOpen = o.userData.collide !== false;
+        o.userData.doorOpenUntil = now + delay * 1000;
+        setPartCollide(o, false);
+        addChatMessage('System', '🚪 Door unlocked!');
+        try { room.send({ type: 'door_open', doorId: o.userData.doorId, duration: delay }); } catch (e) {}
+    });
+}
+
+// Clears the local key inventory and forces every Door shut - called on session start/stop
+// alongside resetWeaponState(), and also brings back any key collected this session so it's
+// there again next time you press Play, same as the weapon pickups.
+function resetKeyDoorState() {
+    heldKeys.clear();
+    world.items.forEach(o => {
+        if (o.userData && o.userData.isKeyPickup && o.userData.collected) {
+            o.userData.collected = false;
+            o.visible = true;
+        }
+        if (o.userData && o.userData.isDoor && o.userData.doorOpenUntil) {
+            o.userData.doorOpenUntil = 0;
+            setPartCollide(o, o.userData._collideBeforeOpen !== false);
+        }
+    });
+}
+
 
 // Clears all weapon state - called whenever a PLAYING/TEST session starts or stops, so
 // nothing lingers (equipped weapon, in-flight rockets, HUD hints) between sessions.
@@ -4353,6 +4524,7 @@ btnStopTest.onclick = () => {
     studioGui.style.display = 'flex';
     resetAllRigsToSpawn();
     resetWeaponState();
+    resetKeyDoorState();
     // Restore selection?
     if (studioSelected) transformControl.attach(studioSelected);
 
@@ -5428,6 +5600,7 @@ btnExit.onclick = () => {
     if (world.mapGroup) world.mapGroup.visible = false;
     resetAllRigsToSpawn();
     resetWeaponState();
+    resetKeyDoorState();
 
     // Clean the address bar back to the base URL, so leaving actually leaves:
     // reloading the page (or copying the URL) won't jump straight back into
@@ -7014,6 +7187,8 @@ function updatePlaying(dt) {
     if (world.mapGroup) world.mapGroup.visible = true;
     menuGroup.visible = false;
     updateWeaponSystem(dt);
+    updateKeyPickups(dt);
+    updateDoors(dt);
     updateHealthHUD();
 
     // Keep the sun's shadow frustum centered on the player (see its setup above) so

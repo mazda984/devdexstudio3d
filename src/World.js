@@ -1184,6 +1184,17 @@ export class World {
                     placedCount++;
                 } else if (d.type === 'weapon_pickup') {
                     this.createWeaponPickup(d.x, d.y, d.z, (d.props && d.props.weaponType) || 'rocketlauncher');
+                } else if (d.type === 'key_pickup') {
+                    const props = d.props || {};
+                    this.createKeyPickup(d.x, d.y, d.z, props.keyId || '', props.pickupId);
+                    placedCount++;
+                } else if (d.type === 'door') {
+                    const props = d.props || {};
+                    const mesh = this.createDoor(d.x, d.y, d.z, d.w || 3, d.h || 5, d.d || 0.5, d.color, props.opensWithKeyId || '', props.reopenDelay, props.doorId);
+                    mesh.rotation.set(d.rx || 0, d.ry || 0, d.rz || 0);
+                    mesh.scale.set(d.sx || 1, d.sy || 1, d.sz || 1);
+                    if (d.name) mesh.name = d.name;
+                    placedCount++;
                 } else if (d.type === 'weapon_rocketlauncher') {
                     // Legacy save format from before Sword existed - always a rocket launcher.
                     this.createWeaponPickup(d.x, d.y, d.z, 'rocketlauncher');
@@ -1313,6 +1324,79 @@ export class World {
         this.mapGroup.add(group);
         this.items.push(group);
         return group;
+    }
+
+    // Builds a Key: a small pickup the player walks into (see main.js's updateKeyPickups)
+    // to add keyId to their held-keys inventory, then vanishes (for everyone - see the
+    // 'key_collected' network message in main.js). keyId is a free-form string set in the
+    // Properties panel; a Door whose "Opens With Key ID" matches it will let the holder pass.
+    // pickupId is a separate, auto-generated ID used only to tell this exact key instance
+    // apart from any other on the network (two keys can share the same keyId on purpose, to
+    // both open the same door) - it's baked into the saved map data so it's identical for
+    // every client that loads it, unlike a fresh Date.now() which would differ per client.
+    createKeyPickup(x, y, z, keyId = '', pickupId = null) {
+        const group = new THREE.Group();
+
+        const bowMat = new THREE.MeshStandardMaterial({ color: 0xffd54a, metalness: 0.75, roughness: 0.3 });
+        const shaftMat = new THREE.MeshStandardMaterial({ color: 0xffe082, metalness: 0.75, roughness: 0.3 });
+
+        const bow = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.06, 8, 16), bowMat);
+        bow.position.set(0, 0.28, 0);
+        bow.rotation.x = Math.PI / 2;
+        group.add(bow);
+
+        const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.55, 8), shaftMat);
+        shaft.position.set(0, -0.1, 0);
+        group.add(shaft);
+
+        const tooth1 = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.08, 0.08), shaftMat);
+        tooth1.position.set(0.12, -0.34, 0);
+        group.add(tooth1);
+        const tooth2 = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.08, 0.08), shaftMat);
+        tooth2.position.set(0.1, -0.2, 0);
+        group.add(tooth2);
+
+        group.traverse(c => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+
+        group.position.set(x || 0, y || 0, z || 0);
+        group.name = 'Key';
+        group.userData = {
+            isKeyPickup: true,
+            keyId: keyId || '',
+            pickupId: pickupId || ('key-' + Date.now() + '-' + Math.floor(Math.random() * 1e6)),
+            collected: false,
+            serial: { type: 'key_pickup', w: 1, h: 1, d: 1, color: 0xffd54a, flags: [], props: { keyId: keyId || '' } }
+        };
+        group.userData.serial.props.pickupId = group.userData.pickupId;
+
+        // Not passed through addToWorld()'s 'static' flag - a key shouldn't block movement.
+        this.mapGroup.add(group);
+        this.items.push(group);
+        return group;
+    }
+
+    // Builds a Door: an ordinary solid block (reuses createBlock for geometry/material/
+    // collision) plus the key-lock behavior main.js's updateDoors() reads every frame:
+    // opensWithKeyId must match a key the player is holding to trigger it, reopenDelay is how
+    // many seconds it stays passable (CanCollide off) before automatically re-locking.
+    // doorId, like a key's pickupId, is baked into the saved map data so every client agrees
+    // on which physical door a 'door_open' network message refers to.
+    createDoor(x, y, z, w = 3, h = 5, d = 0.5, color = 0x6d4a2b, opensWithKeyId = '', reopenDelay = 3, doorId = null) {
+        const mesh = this.createBlock(x, y, z, w, h, d, color, ['static'], 'wood');
+        mesh.name = 'Door';
+        const id = doorId || ('door-' + Date.now() + '-' + Math.floor(Math.random() * 1e6));
+        mesh.userData.isDoor = true;
+        mesh.userData.doorId = id;
+        mesh.userData.opensWithKeyId = opensWithKeyId || '';
+        mesh.userData.reopenDelay = (typeof reopenDelay === 'number' && reopenDelay >= 0) ? reopenDelay : 3;
+        mesh.userData.doorOpenUntil = 0;
+        mesh.userData.serial.type = 'door';
+        mesh.userData.serial.props = Object.assign({}, mesh.userData.serial.props, {
+            doorId: id,
+            opensWithKeyId: mesh.userData.opensWithKeyId,
+            reopenDelay: mesh.userData.reopenDelay
+        });
+        return mesh;
     }
 
     addToWorld(mesh, types = ['static']) {
