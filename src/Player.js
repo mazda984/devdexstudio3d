@@ -13,6 +13,7 @@
     // removed: const oldAudioGraph = {}
 */
 import * as THREE from 'three';
+import { runCommand, extractModifiers } from './ScriptEngine.js';
 import { OBB } from 'three/addons/math/OBB.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { createTorsoTexture, createFaceTexture, boxUnwrapUVs, surfaceManager } from './utils.js';
@@ -1060,6 +1061,7 @@ export class Player {
         if (this.isDead) return;
         this.isDead = true;
         this.mesh.visible = false;
+        try { if (window.__nbloxFire) window.__nbloxFire('death'); } catch (e) {}
         
         // Clear stumble state if we die
         this.stumbleTimer = 0;
@@ -1625,7 +1627,7 @@ export class Player {
             if (!this._scriptTouch) this._scriptTouch = {};
             const pBox = new THREE.Box3().setFromObject(this.mesh);
             world.scriptRules.forEach((rule, idx) => {
-                if (rule.event !== 'touch') return;
+                if (rule.event !== 'touch' && rule.event !== 'touchend') return;
                 const target = (world.items || []).find(o => o.name === rule.blockName);
                 const wasTouching = !!this._scriptTouch[idx];
                 let touching = false;
@@ -1634,8 +1636,10 @@ export class Player {
                     touching = pBox.intersectsBox(tBox);
                 }
                 this._scriptTouch[idx] = touching;
-                if (touching && !wasTouching) {
-                    this.runBlockScriptCommand(rule, target, world);
+                if (rule.event === 'touch' && touching && !wasTouching) {
+                    this.runScriptRule(rule, idx, target, world);
+                } else if (rule.event === 'touchend' && !touching && wasTouching) {
+                    this.runScriptRule(rule, idx, target, world);
                 }
             });
         }
@@ -1998,6 +2002,27 @@ export class Player {
     // Executes one parsed block-script rule (see World.parseScript) that just fired.
     // `target` is the touched block's mesh (may be undefined if the named block
     // couldn't be found - e.g. renamed/deleted after the script was written).
+    // Applies the generic modifiers (once / cooldown=N / chance=N) and "&&" chaining to a
+    // touch-style rule, then runs each command through runBlockScriptCommand.
+    runScriptRule(rule, idx, target, world) {
+        if (!this._ruleState) this._ruleState = {};
+        const st = this._ruleState[idx] || (this._ruleState[idx] = {});
+        const { args, mods } = extractModifiers(rule.args);
+        const now = Date.now();
+        if (mods.once && st.fired) return;
+        if (mods.cooldown && now - (st.lastFire || 0) < mods.cooldown * 1000) return;
+        if (mods.chance < 100 && Math.random() * 100 >= mods.chance) return;
+        st.fired = true; st.lastFire = now;
+
+        const groups = [[]];
+        args.forEach(a => { if (a === '&&') groups.push([]); else groups[groups.length - 1].push(a); });
+        this.runBlockScriptCommand({ ...rule, args: groups[0] }, target, world);
+        for (let i = 1; i < groups.length; i++) {
+            const [c, ...rest] = groups[i];
+            if (c) this.runBlockScriptCommand({ ...rule, command: c.replace(/\?$/, '').toLowerCase(), args: rest }, target, world);
+        }
+    }
+
     runBlockScriptCommand(rule, target, world) {
         const args = rule.args || [];
         // A trailing "player"/"Player" argument is just a readability marker in the
@@ -2070,7 +2095,11 @@ export class Player {
                 break;
             }
             default:
-                console.warn(`Unknown block-script command "${rule.command}?" in rule: ${rule.raw}`);
+                // Everything else (heal?, speed?, hide?, color?, explode?, ...) lives in the
+                // shared ScriptEngine so Player.js doesn't need a case for each one.
+                if (!runCommand(rule.command, args, { world, player: this, target, broadcast: true })) {
+                    console.warn(`Unknown block-script command "${rule.command}?" in rule: ${rule.raw}`);
+                }
         }
     }
 

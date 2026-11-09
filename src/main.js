@@ -30,6 +30,7 @@ import nipplejs from 'nipplejs';
 import JSZip from 'jszip';
 import { World, buildPartMaterials } from './World.js';
 import { Vehicle } from './Vehicle.js';
+import { hooks as scriptHooks, allCommandNames } from './ScriptEngine.js';
 import { Player, createPlayerMesh } from './Player.js';
 import { RemotePlayer } from './RemotePlayer.js';
 import { InputManager } from './InputManager.js';
@@ -644,6 +645,10 @@ room.onmessage = (evt) => {
         if (evt.clientId !== room.clientId && !isPhysicsHost()) {
             applyRigSync(data.rigs);
         }
+        return;
+    }
+    if (data.type === 'script_cmd') {
+        if (evt.clientId !== room.clientId && data.cmd) world.runRemoteCommand(data.cmd, data.args || []);
         return;
     }
     if (data.type === 'key_collected') {
@@ -2171,14 +2176,18 @@ document.getElementById('tool-script').onclick = () => {
                     <button id="btn-script-run" class="menu-btn" style="padding:6px 10px;">Run / Check</button>
                     <div style="flex:1;"></div>
                 </div>
-                <div style="font-size:11px; color:#555; background:#f5f5f5; border:1px solid #ddd; padding:6px 8px; line-height:1.5;">
-                    Name a block in Properties, then write rules here, one per line:<br>
-                    <code>OnTouch:oldurucu kill? player</code> - kills the player who touches the block named "oldurucu"<br>
-                    <code>OnTouch:blok giveTool? Sword player</code> - gives a tool named "Sword"<br>
-                    <code>OnTouch:blok tpTo? SpawnPoint player</code> - teleports the player to the block named "SpawnPoint"<br>
-                    <code>OnTouch:blok place? "Part" player</code> - spawns a new part on top of the touched block<br>
-                    <code>OnTouch:blok place? "Part" tpTo:SpawnPoint player</code> - spawns it on top of a DIFFERENT block instead<br>
-                    <code>OnTickUpdate:changecolor? part red</code> - every ~1.4s, blinks the block named "part" between its color and red
+                <div style="font-size:11px; color:#555; background:#f5f5f5; border:1px solid #ddd; padding:6px 8px; line-height:1.5; max-height:170px; overflow:auto;">
+                    <b>Events</b> (one rule per line; name a block in Properties first):<br>
+                    <code>OnTouch:block cmd? ...</code> · <code>OnTouchEnd:block cmd? ...</code> · <code>OnStart cmd? ...</code> · <code>OnTimer:10 cmd? ...</code> · <code>OnKey:f cmd? ...</code> · <code>OnDeath cmd? ...</code> · <code>OnTickUpdate:cmd? ...</code> · <code>ifpart:touch block cmd?</code><br>
+                    <b>Modifiers</b>: <code>once</code> <code>cooldown=3</code> <code>chance=25</code> — chain with <code>&amp;&amp;</code>: <code>OnTouch:pad heal? 30 &amp;&amp; say? Ahh!</code><br>
+                    <b>Block names</b>: exact <code>door1</code>, wildcard <code>lava*</code>, or <code>all</code>.<br>
+                    <b>Player</b>: kill? heal? fullheal? damage? sethealth? maxhealth? shield? speed? jump? gravity? resetstats? launch? push? fling? freeze? stumble? tpTo? tpxyz? tprandom? tpup? tpforward? tpswap? spawnpoint? say? dance? wave? giveTool? removetool? givekey? removekey? haskey? iftool? ifhealth? random? delay? repeat?<br>
+                    <b>Blocks</b>: hide? show? toggle? delete? clone? color? randomcolor? transparency? opacity? glow? unglow? rename? move? moveto? goto? rotate? setrotation? size? grow? shrink? scatter? collide? anchor? unanchor? drop? bounce? shove? spawn? spawnrain? place? explode? explodeat? sound? sky? fog? nofog? message? announce?<br>
+                    <b>Animations</b> (OnTickUpdate): changecolor? rise? fall? spin? bob? slide? orbit? patrol? pulse? blink? flicker? rainbow? fade? shake? wobble? door?<br>
+                    <b>Examples</b>:<br>
+                    <code>OnTouch:pad speed? 40 5 once</code> · <code>OnTouch:btn hide? wall &amp;&amp; sound? rocketExplode</code><br>
+                    <code>OnTickUpdate:spin? fan 180 y</code> · <code>OnTickUpdate:bob? coin 1.5 2</code> · <code>OnTimer:20 spawnrain? ball 10 0 0 30 red</code><br>
+                    <code>OnKey:f launch? 70 cooldown=2</code> · <code>OnStart announce? "Go!" 3</code> · <code>OnDeath message? "Ouch"</code>
                 </div>
                 <textarea id="script-textarea" spellcheck="false" style="width:100%; height:280px; font-family: 'Courier New', monospace; font-size:13px; background:#0f0f10; color:#e6e6e6; padding:8px; border:1px solid #444; box-sizing:border-box;"></textarea>
                 <div style="display:flex; gap:8px; justify-content:flex-end;">
@@ -2244,7 +2253,7 @@ document.getElementById('tool-script').onclick = () => {
             });
             const ignored = nonEmptyLines.length - rules.length;
             addChatMessage('System', `Check: ${rules.length} rule(s) recognized${ignored > 0 ? `, ${ignored} line(s) not understood` : ''}.`);
-            rules.forEach(r => addChatMessage('System', `  ${r.event === 'tick' ? 'OnTickUpdate' : 'OnTouch:' + r.blockName} → ${r.command}?(${r.args.join(', ')})`));
+            rules.forEach(r => addChatMessage('System', `  ${r.event}${r.blockName ? ':' + r.blockName : ''}${r.key ? ':' + r.key : ''}${r.seconds ? ':' + r.seconds : ''} → ${r.command || r.action}?(${(r.args || []).join(', ')})`));
         });
     } else {
         // Restore textarea content if it's empty (e.g. window was created but never filled)
@@ -3406,6 +3415,46 @@ const weaponSystemState = { eWasDown: false };
 // not synced directly - each player keeps their own inventory, exactly like the weapon slot.
 const heldKeys = new Set();
 
+// --- Script engine glue --------------------------------------------------------------------
+// ScriptEngine.js is a standalone command library; these hooks give it access to things that
+// live in main.js's scope (explosions, sound, chat, key inventory, HUD banner, networking).
+window.__nbloxHeldKeys = heldKeys;
+window.__nbloxFire = (event) => { try { world.fireRules(event, player); } catch (e) {} };
+scriptHooks.explode = (center, radius, force, damage) => {
+    explodeAt(center, radius, force, damage);
+    spawnExplosionVFX(center);
+    playSfx('rocketExplode');
+};
+scriptHooks.sfx = (name, vol) => playSfx(name, vol);
+scriptHooks.message = (text) => addChatMessage('System', text);
+scriptHooks.giveKey = (id) => { if (id) heldKeys.add(id); };
+scriptHooks.removeKey = (id) => heldKeys.delete(id);
+scriptHooks.setSky = (hex) => { scene.background = new THREE.Color(hex); };
+scriptHooks.banner = (text, seconds = 3) => {
+    let el = document.getElementById('script-banner');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'script-banner';
+        el.style.cssText = 'position:fixed; top:18%; left:50%; transform:translateX(-50%); z-index:99998; padding:10px 28px; font:bold 30px sans-serif; color:#fff; background:rgba(0,0,0,0.55); border-radius:8px; text-shadow:0 2px 4px #000; pointer-events:none; display:none;';
+        document.body.appendChild(el);
+    }
+    el.textContent = text; el.style.display = 'block';
+    clearTimeout(el._t); el._t = setTimeout(() => { el.style.display = 'none'; }, seconds * 1000);
+};
+// A player-triggered world change (hide?/color?/move?/...) is sent to everyone else so all
+// screens stay identical; they apply it via world.runRemoteCommand() (no re-broadcast).
+scriptHooks.broadcast = (cmd, args) => { try { room.send({ type: 'script_cmd', cmd, args }); } catch (e) {} };
+
+// OnKey:<letter> rules - fire when the player presses that key during play.
+window.addEventListener('keydown', (e) => {
+    if (gameState !== 'PLAYING' && gameState !== 'TEST') return;
+    if (e.repeat || !world || !world.scriptRules) return;
+    const tag = (document.activeElement && document.activeElement.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    const k = e.key.toLowerCase();
+    world.fireRules('key', player, r => r.key === k);
+});
+
 // Called every frame from updatePlaying(): walking into an uncollected Key picks it up -
 // added to heldKeys locally, and hidden for EVERYONE (a 'key_collected' broadcast), since a
 // key is a one-time pickup, not a reusable rack like the weapon spawns.
@@ -3513,7 +3562,7 @@ document.body.appendChild(flappyBirdOverlay);
 const flappyIframe = flappyBirdOverlay.querySelector('#flappy-iframe');
 
 function openFlappyBirdWebview() {
-    flappyIframe.src = 'https://mazda984.github.io/devos/';
+    flappyIframe.src = 'https://flappybird.io/';
     flappyBirdOverlay.style.display = 'flex';
     if (document.pointerLockElement) document.exitPointerLock();
 }
@@ -4448,6 +4497,8 @@ btnPlaySolo.onclick = () => {
     
     player.mesh.visible = true;
     player.respawn(world);
+    world._ruleStates = new Map(); world.customSpawn = null;
+    setTimeout(() => world.fireRules('start', player), 300);
     setCameraViewMode(world.cameraMode || 'third');
 
     // Handle Custom Music: Play Test used to never touch world.bgm at all, so any music you
@@ -5030,6 +5081,8 @@ function startGame(mapName, mapData = null, opts = {}) {
     playerList.style.display = 'none';
 
     gameState = 'PLAYING';
+    world._ruleStates = new Map(); world.customSpawn = null;
+    setTimeout(() => world.fireRules('start', player), 800);
     player.forcedAnim = null; // Reset forced animation from menu
     playSfx('join');
 
@@ -7358,6 +7411,7 @@ function updatePlaying(dt) {
     // Block-touch/tick scripts: OnTickUpdate:command? rules run on their own fixed timer
     // here (once per frame, world-level - not tied to any particular player).
     world.updateScriptTicks(dt);
+    world.updateTimerRules(player);
     // ifpart:touch <blockName> command? rules: checks every unanchored/moving part against
     // its target block every frame (part-vs-part contact, not player touch).
     world.updatePartTouchScripts();

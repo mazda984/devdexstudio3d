@@ -9,6 +9,7 @@
     // removed: const heavyAnimatedDefinitions = {}
 */
 import * as THREE from 'three';
+import { TICK_COMMANDS, runRule, runCommand } from './ScriptEngine.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { boxUnwrapUVs, surfaceManager, materialTextures, terrainTextures } from './utils.js';
 import { Vehicle } from './Vehicle.js';
@@ -353,6 +354,39 @@ export class World {
                 return args;
             };
 
+            // --- Extra event types -------------------------------------------------------
+            // OnTouchEnd:<block> command? ...  - when the player STOPS touching the block
+            const touchEndMatch = line.match(/^OnTouchEnd:(\S+)\s+(\w+)\?\s*(.*)$/i);
+            if (touchEndMatch) {
+                const [, blockName, commandRaw, rest] = touchEndMatch;
+                rules.push({ event: 'touchend', blockName, command: commandRaw.toLowerCase(), args: parseArgs(rest), raw: line });
+                continue;
+            }
+            // OnStart command? ...  - once when a round/test begins
+            const startMatch = line.match(/^OnStart\s+(\w+)\?\s*(.*)$/i);
+            if (startMatch) {
+                rules.push({ event: 'start', command: startMatch[1].toLowerCase(), args: parseArgs(startMatch[2]), raw: line });
+                continue;
+            }
+            // OnTimer:<seconds> command? ...  - every N seconds (synced clock)
+            const timerMatch = line.match(/^OnTimer:(\d+(?:\.\d+)?)\s+(\w+)\?\s*(.*)$/i);
+            if (timerMatch) {
+                rules.push({ event: 'timer', seconds: parseFloat(timerMatch[1]), command: timerMatch[2].toLowerCase(), args: parseArgs(timerMatch[3]), raw: line });
+                continue;
+            }
+            // OnKey:<letter> command? ...  - when the player presses that key
+            const keyMatch = line.match(/^OnKey:(\S+)\s+(\w+)\?\s*(.*)$/i);
+            if (keyMatch) {
+                rules.push({ event: 'key', key: keyMatch[1].toLowerCase(), command: keyMatch[2].toLowerCase(), args: parseArgs(keyMatch[3]), raw: line });
+                continue;
+            }
+            // OnDeath command? ...  - whenever the local player dies
+            const deathMatch = line.match(/^OnDeath\s+(\w+)\?\s*(.*)$/i);
+            if (deathMatch) {
+                rules.push({ event: 'death', command: deathMatch[1].toLowerCase(), args: parseArgs(deathMatch[2]), raw: line });
+                continue;
+            }
+
             // OnTouch:<blockName> command? args... - fires when a player touches <blockName>.
             const touchMatch = line.match(/^OnTouch:(\S+)\s+(\w+)\?\s*(.*)$/i);
             if (touchMatch) {
@@ -431,6 +465,42 @@ export class World {
             }
         }
         return rules;
+    }
+
+    // Fires every rule of a given event type (start/death/key/timer) through the engine.
+    // filter(rule) -> bool lets callers pick e.g. only OnKey:e rules.
+    fireRules(event, player, filter) {
+        if (!this.scriptRules) return;
+        if (!this._ruleStates) this._ruleStates = new Map();
+        this.scriptRules.forEach(rule => {
+            if (rule.event !== event) return;
+            if (filter && !filter(rule)) return;
+            let st = this._ruleStates.get(rule); if (!st) this._ruleStates.set(rule, st = {});
+            runRule(rule, { world: this, player, target: null, broadcast: event === 'key' }, st);
+        });
+    }
+
+    // OnTimer:<n> rules: fire when the shared clock crosses a multiple of n seconds, so every
+    // client fires on the same boundary without any network messages.
+    updateTimerRules(player) {
+        if (!this.scriptRules || !this.scriptRules.some(r => r.event === 'timer')) return;
+        const now = World.syncedNow() / 1000;
+        this.scriptRules.forEach(rule => {
+            if (rule.event !== 'timer' || !(rule.seconds > 0)) return;
+            const cycle = Math.floor(now / rule.seconds);
+            if (rule._lastCycle === undefined) { rule._lastCycle = cycle; return; }
+            if (cycle !== rule._lastCycle) {
+                rule._lastCycle = cycle;
+                if (!this._ruleStates) this._ruleStates = new Map();
+                let st = this._ruleStates.get(rule); if (!st) this._ruleStates.set(rule, st = {});
+                runRule(rule, { world: this, player, target: null, broadcast: false }, st);
+            }
+        });
+    }
+
+    // A world-changing command that another player's script triggered (see 'script_cmd').
+    runRemoteCommand(cmd, args) {
+        runCommand(cmd, args, { world: this, player: null, target: null, remote: true, broadcast: false });
     }
 
     setScript(text) {
@@ -541,8 +611,11 @@ export class World {
                 target.position.y = target.userData._riseBaseY + cyclePos * step;
                 break;
             }
-            default:
-                console.warn(`Unknown OnTickUpdate command "${rule.command}?" in rule: ${rule.raw}`);
+            default: {
+                const fn = TICK_COMMANDS[rule.command];
+                if (fn) fn(this, rule, World.syncedNow() / 1000, tickCount);
+                else console.warn(`Unknown OnTickUpdate command "${rule.command}?" in rule: ${rule.raw}`);
+            }
         }
     }
 
@@ -583,7 +656,11 @@ export class World {
                 this.removePart(part);
                 break;
             default:
-                console.warn(`Unknown ifpart:touch command "${rule.command}" in rule: ${rule.raw}`);
+                // Any other command runs through the shared engine with the touching part as
+                // the "target" (e.g. ifpart:touch lava explode? , color? ...).
+                if (!runCommand(rule.command, rule.args, { world: this, player: null, target: part, broadcast: false })) {
+                    console.warn(`Unknown ifpart:touch command "${rule.command}" in rule: ${rule.raw}`);
+                }
         }
     }
 
@@ -1536,6 +1613,7 @@ export class World {
     }
 
     getSpawnPoint() {
+        if (this.customSpawn) return this.customSpawn.clone().add(new THREE.Vector3(0, 2, 0));
         const spawns = this.items.filter(i => 
             i.userData.serial && i.userData.serial.flags && i.userData.serial.flags.includes('spawn')
         );
