@@ -58,6 +58,8 @@ export const hooks = {
     message: null,     // (text) -> system chat line
     giveKey: null,     // (keyId)
     removeKey: null,   // (keyId)
+    giveWeapon: null,  // (type) equip rocketlauncher|sword|nokia|buildtool
+    removeWeapon: null, // () unequip
     banner: null,      // (text, seconds) big on-screen text
     setSky: null,      // (hexColor)
     openUrl: null,
@@ -321,6 +323,9 @@ export const PLAYER_COMMANDS = {
         p.chat(`Received: ${name}`);
     },
     removetool(p, [name]) { if (p.tools) p.tools = p.tools.filter(t => t !== name); },
+    // giveweapon? rocketlauncher|sword|nokia|buildtool  - equips it instantly
+    giveweapon(p, [type]) { if (hooks.giveWeapon) hooks.giveWeapon((type || 'rocketlauncher').toLowerCase()); },
+    removeweapon() { if (hooks.removeWeapon) hooks.removeWeapon(); },
     givekey(p, [id]) { if (hooks.giveKey) hooks.giveKey(id); p.chat(`Got key: ${id}`); },
     removekey(p, [id]) { if (hooks.removeKey) hooks.removeKey(id); },
     // haskey? <id> <command> <args...> - only runs the nested command if the player owns the key

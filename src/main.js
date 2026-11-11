@@ -2181,7 +2181,7 @@ document.getElementById('tool-script').onclick = () => {
                     <code>OnTouch:block cmd? ...</code> · <code>OnTouchEnd:block cmd? ...</code> · <code>OnStart cmd? ...</code> · <code>OnTimer:10 cmd? ...</code> · <code>OnKey:f cmd? ...</code> · <code>OnDeath cmd? ...</code> · <code>OnTickUpdate:cmd? ...</code> · <code>ifpart:touch block cmd?</code><br>
                     <b>Modifiers</b>: <code>once</code> <code>cooldown=3</code> <code>chance=25</code> — chain with <code>&amp;&amp;</code>: <code>OnTouch:pad heal? 30 &amp;&amp; say? Ahh!</code><br>
                     <b>Block names</b>: exact <code>door1</code>, wildcard <code>lava*</code>, or <code>all</code>.<br>
-                    <b>Player</b>: kill? heal? fullheal? damage? sethealth? maxhealth? shield? speed? jump? gravity? resetstats? launch? push? fling? freeze? stumble? tpTo? tpxyz? tprandom? tpup? tpforward? tpswap? spawnpoint? say? dance? wave? giveTool? removetool? givekey? removekey? haskey? iftool? ifhealth? random? delay? repeat?<br>
+                    <b>Player</b>: kill? heal? fullheal? damage? sethealth? maxhealth? shield? speed? jump? gravity? resetstats? launch? push? fling? freeze? stumble? tpTo? tpxyz? tprandom? tpup? tpforward? tpswap? spawnpoint? say? dance? wave? giveTool? removetool? giveweapon? removeweapon? givekey? removekey? haskey? iftool? ifhealth? random? delay? repeat?<br>
                     <b>Blocks</b>: hide? show? toggle? delete? clone? color? randomcolor? transparency? opacity? glow? unglow? rename? move? moveto? goto? rotate? setrotation? size? grow? shrink? scatter? collide? anchor? unanchor? drop? bounce? shove? spawn? spawnrain? place? explode? explodeat? sound? sky? fog? nofog? message? announce?<br>
                     <b>Animations</b> (OnTickUpdate): changecolor? rise? fall? spin? bob? slide? orbit? patrol? pulse? blink? flicker? rainbow? fade? shake? wobble? door?<br>
                     <b>Examples</b>:<br>
@@ -3424,6 +3424,24 @@ scriptHooks.explode = (center, radius, force, damage) => {
     explodeAt(center, radius, force, damage);
     spawnExplosionVFX(center);
     playSfx('rocketExplode');
+};
+scriptHooks.giveWeapon = (type) => {
+    if (!WEAPON_INFO[type]) type = 'rocketlauncher';
+    equippedWeapon = type;
+    const eqInfo = WEAPON_INFO[type];
+    weaponHint.style.display = 'none';
+    weaponSlotIcon.textContent = eqInfo.icon;
+    weaponInventorySlot.style.display = 'flex';
+    weaponEquippedLabel.textContent = eqInfo.icon + ' ' + eqInfo.equippedText;
+    weaponEquippedLabel.style.display = 'block';
+    addChatMessage('System', `Equipped ${eqInfo.label}!`);
+};
+scriptHooks.removeWeapon = () => {
+    if (!equippedWeapon) return;
+    equippedWeapon = null;
+    weaponEquippedLabel.style.display = 'none';
+    weaponInventorySlot.style.display = 'none';
+    addChatMessage('System', 'Weapon removed.');
 };
 scriptHooks.sfx = (name, vol) => playSfx(name, vol);
 scriptHooks.message = (text) => addChatMessage('System', text);
