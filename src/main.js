@@ -2182,7 +2182,7 @@ document.getElementById('tool-script').onclick = () => {
                     <b>Modifiers</b>: <code>once</code> <code>cooldown=3</code> <code>chance=25</code> — chain with <code>&amp;&amp;</code>: <code>OnTouch:pad heal? 30 &amp;&amp; say? Ahh!</code><br>
                     <b>Block names</b>: exact <code>door1</code>, wildcard <code>lava*</code>, or <code>all</code>.<br>
                     <b>Player</b>: kill? heal? fullheal? damage? sethealth? maxhealth? shield? speed? jump? gravity? resetstats? launch? push? fling? freeze? stumble? tpTo? tpxyz? tprandom? tpup? tpforward? tpswap? spawnpoint? say? dance? wave? giveTool? removetool? giveweapon? removeweapon? givekey? removekey? haskey? iftool? ifhealth? random? delay? repeat?<br>
-                    <b>Blocks</b>: hide? show? toggle? delete? clone? color? randomcolor? transparency? opacity? glow? unglow? rename? move? moveto? goto? rotate? setrotation? size? grow? shrink? scatter? collide? anchor? unanchor? drop? bounce? shove? spawn? spawnrain? place? explode? explodeat? sound? sky? fog? nofog? message? announce?<br>
+                    <b>Blocks</b>: hide? show? toggle? delete? clone? color? randomcolor? transparency? opacity? glow? unglow? rename? move? moveto? goto? rotate? setrotation? size? grow? shrink? scatter? collide? anchor? unanchor? drop? bounce? shove? spawn? spawnrain? place? explode? explodeat? sound? sky? fog? nofog? brightness? darkness? night? day? message? announce?<br>
                     <b>Animations</b> (OnTickUpdate): changecolor? rise? fall? spin? bob? slide? orbit? patrol? pulse? blink? flicker? rainbow? fade? shake? wobble? door?<br>
                     <b>Examples</b>:<br>
                     <code>OnTouch:pad speed? 40 5 once</code> · <code>OnTouch:btn hide? wall &amp;&amp; sound? rocketExplode</code><br>
@@ -3443,6 +3443,7 @@ scriptHooks.removeWeapon = () => {
     weaponInventorySlot.style.display = 'none';
     addChatMessage('System', 'Weapon removed.');
 };
+scriptHooks.setBrightness = (b) => applyWorldLighting(b);
 scriptHooks.sfx = (name, vol) => playSfx(name, vol);
 scriptHooks.message = (text) => addChatMessage('System', text);
 scriptHooks.giveKey = (id) => { if (id) heldKeys.add(id); };
@@ -3527,6 +3528,8 @@ function updateDoors(dt) {
 // alongside resetWeaponState(), and also brings back any key collected this session so it's
 // there again next time you press Play, same as the weapon pickups.
 function resetKeyDoorState() {
+    // Undo any script-made fog/darkness so the map's own saved lighting comes back.
+    try { scene.fog = null; applyWorldLighting(world.lighting && world.lighting.brightness); } catch (e) {}
     heldKeys.clear();
     world.items.forEach(o => {
         if (o.userData && o.userData.isKeyPickup && o.userData.collected) {

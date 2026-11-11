@@ -63,6 +63,7 @@ export const hooks = {
     banner: null,      // (text, seconds) big on-screen text
     setSky: null,      // (hexColor)
     openUrl: null,
+    setBrightness: null, // (0..1) day/night light level
     broadcast: null,   // (command, args) -> sends a 'script_cmd' to other players
 };
 
@@ -216,6 +217,15 @@ export const WORLD_COMMANDS = {
         if (!scene) return;
         scene.fog = new THREE.FogExp2(world.constructor.parseColorArg(col || 'gray'), num(density, 0.01));
     },
+    // brightness? 0.15  -> 0 = pitch black night, 1 = full daylight (lights + skybox)
+    brightness(world, [v]) { if (hooks.setBrightness) hooks.setBrightness(Math.min(1, Math.max(0, num(v, 0.5)))); },
+    darkness(world, [v]) { if (hooks.setBrightness) hooks.setBrightness(1 - Math.min(1, Math.max(0, num(v, 0.8)))); },
+    // night? [brightness] [fogColor] [fogDensity] - one-shot dark, foggy atmosphere
+    night(world, [b, col, dens]) {
+        if (hooks.setBrightness) hooks.setBrightness(Math.min(1, Math.max(0, num(b, 0.12))));
+        if (world.scene) world.scene.fog = new THREE.FogExp2(world.constructor.parseColorArg(col || 'black'), num(dens, 0.03));
+    },
+    day(world) { if (hooks.setBrightness) hooks.setBrightness(0.75); if (world.scene) world.scene.fog = null; },
     nofog(world) { if (world.scene) world.scene.fog = null; },
 
     // ---- messages (everyone sees)
